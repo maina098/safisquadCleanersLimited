@@ -4,7 +4,7 @@ A full-stack workspace dashboard with a React frontend, Express/Node.js backend,
 
 ## Structure
 
-- `frontend/` React + Vite dashboard and migrated Fabricspa website
+- `frontend/` React + Vite dashboard and migrated Safi Squad Cleaning Services Limited website
 - `backend/` Express API, PostgreSQL pool, and schema
 
 ## Run locally
@@ -26,4 +26,4 @@ A full-stack workspace dashboard with a React frontend, Express/Node.js backend,
    npm run dev
    ```
 
-The dashboard runs at `http://localhost:5173`; the migrated Fabricspa website is available at `http://localhost:5173/fabricspa.com/index.html`; the API runs at `http://localhost:4000`.
+The dashboard runs at `http://localhost:5173`; the migrated Safi Squad Cleaning Services Limited website is available at `http://localhost:5173/fabricspa.com/index.html`; the API runs at `http://localhost:4000`.
