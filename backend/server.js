@@ -325,6 +325,6 @@ app.post('/api/settlements/:id/approve', authGuard(['ADMIN', 'FINANCE_OFFICER'])
 
 app.listen(port, async () => {
   try { await ensureSchema(); await seedLocalAdmin(); console.log(usingLocalStorage ? 'Using local order storage' : 'Database schema ready'); } catch (error) { console.error('Database schema setup failed', error.message); }
-  console.log(`V Legendary API running on http://localhost:${port}`);
+  console.log(`Safi Squad API running on http://localhost:${port}`);
   cron.schedule('0 23 * * 0', () => createScheduledSettlementDraft().catch((error) => console.error('Settlement draft failed', error.message)));
 });

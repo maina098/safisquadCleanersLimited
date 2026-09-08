@@ -84,3 +84,48 @@ All images are referenced from GitHub repository:
 - All service images are pulled directly from GitHub URLs, ensuring centralized management
 - The service list now focuses on garment care and specialized cleaning services
 - Removed generic "House" and "Compound" cleaning services as requested
+
+## Architecture and Quality Update - September 8, 2026
+
+### React and Node ownership
+- Renamed frontend and backend package identities to `safisquad-frontend` and `safisquad-backend`.
+- Replaced the old `vlegendary` PostgreSQL example database with `safisquad`.
+- Updated the Node API startup message and repository documentation to describe Safi Squad, not the previous scaffold.
+- Kept the frontend as a React 19 + Vite application and the backend as an Express + Node.js CommonJS API.
+- Limited frontend linting to authored `src` code so archived third-party website assets do not obscure application diagnostics.
+
+### Runtime dependency cleanup
+- Copied the workflow and care media used by React into `frontend/public/assets/`.
+- Updated React references to use first-party `/assets/*` paths.
+- The historical `frontend/public/fabricspa.com/` scrape remains available for reference but is no longer required by the React runtime.
+
+### Mobile and accessibility hardening
+- Preserved grid-to-stack breakpoints for navigation, service cards, pricing, tracking, portal, and footer layouts.
+- Added visible `:focus-visible` styles for keyboard users.
+- Added accessible labels and announced error states to tracking and booking forms.
+- Added booking submission feedback and duplicate-submit prevention.
+- Added mobile-safe cookie consent button wrapping and modal layouts.
+
+### SEO, privacy, and resilience
+- Added public SPA handling for `/privacy-policy`, `/terms`, and `/faq`.
+- Added page-specific document titles, descriptions, and canonical URLs.
+- Added static `frontend/public/404.html` with `noindex` metadata.
+- Removed fragment URLs from the sitemap and retained crawl rules in `robots.txt`.
+- Removed the placeholder analytics script. Google Analytics now loads only when `VITE_GA_MEASUREMENT_ID` is configured and optional consent is accepted.
+- Cookie controls now distinguish optional analytics acceptance from declining optional cookies.
+
+### Verification completed
+- `frontend`: `npm run lint` scoped to authored React source.
+- `frontend`: `npm run build` completes successfully.
+- `backend`: `npm test` validates Node syntax.
+- Preview smoke checks return `200` for `/`, `/privacy-policy`, `/terms`, `/faq`, `/robots.txt`, `/sitemap.xml`, and `/404.html`.
+
+## Recommended next improvements
+
+1. Add automated browser tests for booking, tracking, cookie consent, keyboard navigation, and the 320px/375px/768px/1280px layouts.
+2. Add API request validation and rate limiting at the Express boundary, especially for login, booking, and tracking endpoints.
+3. Add database migrations, backups, structured logging, and monitoring before production use.
+4. Add server-side rendering or prerendering if organic search traffic becomes a priority for policy and FAQ content.
+5. Replace remote GitHub service images with optimized local WebP/AVIF assets and add image failure fallbacks.
+6. Review the archived `fabricspa.com` directory and remove it after confirming no deployment or historical-link requirement depends on it.
+7. Configure deployment SPA fallback, HTTPS, strict CORS origins, secure JWT secrets, and real payment/SMS credentials.
