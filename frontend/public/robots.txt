@@ -1,0 +1,27 @@
+# Robots.txt for Safi Squad
+# Allow all search engines to crawl the website
+User-agent: *
+Allow: /
+Disallow: /admin
+Disallow: /*.json$
+Disallow: /*?*sort=
+Disallow: /search?
+
+# Sitemap location
+Sitemap: https://safisquad.com/sitemap.xml
+
+# Specific rules for popular search engines
+User-agent: Googlebot
+Allow: /
+Crawl-delay: 0
+
+User-agent: Bingbot
+Allow: /
+Crawl-delay: 1
+
+# Block bad bots
+User-agent: MJ12bot
+Disallow: /
+
+User-agent: AhrefsBot
+Disallow: /
