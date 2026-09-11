@@ -7,6 +7,7 @@ const express = require('express');
 const pool = require('./db');
 const { hashPassword, verifyPassword, issueToken, authGuard } = require('./security');
 const twilio = require('twilio');
+const nodemailer = require('nodemailer');
 const QRCode = require('qrcode');
 const cron = require('node-cron');
 
@@ -35,10 +36,20 @@ function saveLocalWorkflow() { fs.writeFileSync(localWorkflowPath, JSON.stringif
 function saveLocalPayouts() { fs.writeFileSync(localPayoutsPath, JSON.stringify(localPayouts, null, 2)); }
 function calculateOrderTotal(serviceId, quantity) { const service = serviceCatalog.find((item) => item.id === serviceId); if (!service) return null; return { service, total: service.price * Math.max(1, Number(quantity) || 1) }; }
 async function notifyOperations(order) {
-  if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN || !process.env.TWILIO_FROM || !process.env.OPERATIONS_PHONE) return { status: 'NOT_CONFIGURED' };
-  const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-  await client.messages.create({ body: `New SafiCleaners order ${order.tracking_code}: ${order.service} for ${order.customer_name}.`, from: process.env.TWILIO_FROM, to: process.env.OPERATIONS_PHONE });
-  return { status: 'SENT' };
+  const results = { email: 'NOT_CONFIGURED', sms: 'NOT_CONFIGURED' };
+  const services = Array.isArray(order.services) ? order.services : [order.service];
+  const details = order.service_details || {};
+  if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
+    try {
+      const transporter = nodemailer.createTransport({ host: process.env.SMTP_HOST, port: Number(process.env.SMTP_PORT) || 587, secure: process.env.SMTP_SECURE === 'true', auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS } });
+      await transporter.sendMail({ from: process.env.SMTP_FROM || process.env.SMTP_USER, to: process.env.OPERATIONS_EMAIL || 'safisquaadcleaningservices@gmail.com', replyTo: order.email || undefined, subject: `New Safi Squad pickup request ${order.tracking_code}`, text: [`New Safi Squad pickup request`, `Tracking code: ${order.tracking_code}`, `Name: ${order.customer_name}`, `Phone / WhatsApp: ${order.phone}`, `Customer email: ${order.email || 'Not provided'}`, `Services: ${services.join(', ')}`, `Building / estate: ${details.building || order.address}`, `Room / house: ${details.room || 'Not provided'}`, `Floor / level: ${details.floor || 'Not provided'}`, `Picking date: ${order.preferred_date}`, `Picking time: ${details.preferredTime || 'Not provided'}`, `Notes: ${details.notes || 'None'}`, `Estimated cost: KES ${order.estimated_cost}`].join('\n') });
+      results.email = 'SENT';
+    } catch (error) { console.error('Operations email failed', error.message); results.email = 'FAILED'; }
+  }
+  if (process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.TWILIO_FROM && process.env.OPERATIONS_PHONE) {
+    try { const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN); await client.messages.create({ body: `New Safi Squad order ${order.tracking_code}: ${services.join(', ')} for ${order.customer_name}.`, from: process.env.TWILIO_FROM, to: process.env.OPERATIONS_PHONE }); results.sms = 'SENT'; } catch (error) { console.error('Operations SMS failed', error.message); results.sms = 'FAILED'; }
+  }
+  return results;
 }
 async function triggerMpesaStk(phone, amount, trackingCode) {
   if (!process.env.DARAJA_CONSUMER_KEY || !process.env.DARAJA_CONSUMER_SECRET || !process.env.DARAJA_SHORTCODE || !process.env.DARAJA_PASSKEY || !process.env.DARAJA_CALLBACK_URL) return { status: 'NOT_CONFIGURED' };
@@ -163,22 +174,26 @@ app.post('/api/users', authGuard(['ADMIN']), async (request, response) => {
 });
 
 app.post('/api/orders', async (request, response) => {
-  const { name, phone, email, address, preferredDate, serviceId, service, details, quantity, estimatedCost } = request.body;
-  if (!name || !phone || !address || !preferredDate || (!serviceId && !service)) {
-    return response.status(400).json({ error: 'Name, phone, address, preferred date, and service are required.' });
+  const { name, phone, email, address, building, room, floor, preferredDate, preferredTime, serviceId, service, services = [], details, quantity, estimatedCost } = request.body;
+  const requestedServices = Array.isArray(services) ? services.filter(Boolean) : [service].filter(Boolean);
+  const pickupAddress = address || [building, room, floor].filter(Boolean).join(', ');
+  if (!name || !phone || !email || !pickupAddress || !building || !room || !preferredDate || !preferredTime || !requestedServices.length) {
+    return response.status(400).json({ error: 'Name, phone, email, pickup details, preferred date and time, and at least one service are required.' });
   }
-  const selected = calculateOrderTotal(serviceId || serviceCatalog.find((item) => item.name === service)?.id || 'house-deep-cleaning', quantity);
+  const selectedService = service || requestedServices[0];
+  const selected = calculateOrderTotal(serviceId || serviceCatalog.find((item) => item.name === selectedService)?.id || 'house-deep-cleaning', quantity);
   if (!selected) return response.status(400).json({ error: 'Unknown service.' });
-  const total = selected.total;
+  const total = requestedServices.reduce((sum, requestedService) => { const match = serviceCatalog.find((item) => item.name === requestedService); return sum + (match ? match.price * Math.max(1, Number(quantity) || 1) : 0) }, 0) || selected.total;
+  const serviceDetails = { building, room, floor: floor || '', preferredTime, notes: details || '', services: requestedServices };
   const customerIsNew = usingLocalStorage ? !localOrders.some((item) => item.phone === phone) : (await pool.query('SELECT 1 FROM orders WHERE phone = $1 LIMIT 1', [phone])).rowCount === 0;
   const depositPaid = customerIsNew ? total * 0.5 : 0;
   if (usingLocalStorage) {
     const now = new Date().toISOString();
-    const order = { id: localOrders.length + 1, tracking_code: `SQ-${Date.now().toString(36).toUpperCase()}`, customer_name: name, phone, email: email || null, address, preferred_date: preferredDate, service: selected.service.name, service_id: selected.service.id, service_details: details || null, quantity: Number(quantity) || 1, estimated_cost: total, deposit_paid: depositPaid, customer_is_new: customerIsNew, status: 'Pending', created_at: now, updated_at: now, events: [{ status: 'Pending', note: 'Booking received', created_at: now }], workflow_steps: [{ status: 'Pending', started_at: now }], photos: [] };
+    const order = { id: localOrders.length + 1, tracking_code: `SQ-${Date.now().toString(36).toUpperCase()}`, customer_name: name, phone, email, address: pickupAddress, preferred_date: preferredDate, service: requestedServices.join(', '), services: requestedServices, service_id: selected.service.id, service_details: serviceDetails, quantity: Number(quantity) || 1, estimated_cost: total, deposit_paid: depositPaid, customer_is_new: customerIsNew, status: 'Pending', created_at: now, updated_at: now, events: [{ status: 'Pending', note: 'Booking received', created_at: now }], workflow_steps: [{ status: 'Pending', started_at: now }], photos: [] };
     localOrders.unshift(order); saveLocalOrders();
     if (depositPaid > 0) triggerMpesaStk(phone, depositPaid, order.tracking_code).catch((error) => console.error('M-Pesa STK request failed', error.message));
-    notifyOperations(order).catch((error) => console.error('Operations SMS failed', error.message));
-    return response.status(201).json({ order });
+    const notification = await notifyOperations(order);
+    return response.status(201).json({ order, notification });
   }
   const client = await pool.connect();
   try {
@@ -187,7 +202,7 @@ app.post('/api/orders', async (request, response) => {
     const orderResult = await client.query(
       `INSERT INTO orders (tracking_code, customer_name, phone, email, address, preferred_date, service, service_details, quantity, estimated_cost, deposit_paid)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
-      [trackingCode, name, phone, email || null, address, preferredDate, selected.service.name, details || null, Number(quantity) || 1, total, depositPaid],
+      [trackingCode, name, phone, email, pickupAddress, preferredDate, requestedServices.join(', '), JSON.stringify(serviceDetails), Number(quantity) || 1, total, depositPaid],
     );
     const order = orderResult.rows[0];
     await client.query('INSERT INTO order_events (order_id, status, note) VALUES ($1, $2, $3)', [order.id, 'Pending', 'Booking received']);
@@ -195,8 +210,8 @@ app.post('/api/orders', async (request, response) => {
     await client.query('INSERT INTO payments (order_id, amount, type, status) VALUES ($1, $2, $3, $4)', [order.id, depositPaid, 'DEPOSIT', 'PENDING']);
     await client.query('COMMIT');
     if (depositPaid > 0) triggerMpesaStk(phone, depositPaid, order.tracking_code).catch((error) => console.error('M-Pesa STK request failed', error.message));
-    notifyOperations(order).catch((error) => console.error('Operations SMS failed', error.message));
-    response.status(201).json({ order: { ...order, events: [{ status: 'Pending', note: 'Booking received', created_at: order.created_at }] } });
+    const notification = await notifyOperations({ ...order, services: requestedServices, service_details: serviceDetails });
+    response.status(201).json({ order: { ...order, services: requestedServices, service_details: serviceDetails, events: [{ status: 'Pending', note: 'Booking received', created_at: order.created_at }] }, notification });
   } catch (error) {
     await client.query('ROLLBACK');
     console.error('Order creation failed', error.message);

@@ -22,6 +22,8 @@ The archived `frontend/public/fabricspa.com/` tree is retained as historical sou
 
 2. Configure the API. Copy `backend/.env.example` to `backend/.env`. For PostgreSQL, create a database named `safisquad`, set `DATABASE_URL`, and apply `backend/schema.sql`. Without `DATABASE_URL`, the API uses the local JSON files for development.
 
+   Booking requests are emailed to `safisquaadcleaningservices@gmail.com` when SMTP is configured. Set `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, and optionally `SMTP_FROM`, `OPERATIONS_EMAIL`, and `SMTP_SECURE=true` in `backend/.env`. The booking confirmation is only shown after the API has saved the reservation; the API response also reports email delivery as `SENT`, `FAILED`, or `NOT_CONFIGURED`.
+
 3. Start the API in one terminal:
 
    ```powershell
