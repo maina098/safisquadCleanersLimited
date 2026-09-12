@@ -15,10 +15,10 @@ const app = express();
 const port = Number(process.env.PORT) || 4000;
 const orderStatuses = ['Pending', 'Picked Up', 'In-Progress', 'QC Passed', 'Out for Delivery', 'Delivered'];
 const serviceCatalog = [
-  { id: 'house-deep-cleaning', name: 'House deep-cleaning', rule: 'FIXED', price: 3500 },
-  { id: 'laundry', name: 'Laundry', rule: 'PER_KG', price: 250 },
-  { id: 'carpet-cleaning', name: 'Carpet cleaning', rule: 'PER_SQM', price: 180 },
-  { id: 'office-cleaning-contract', name: 'Office cleaning contract', rule: 'MONTHLY', price: 15000 },
+  { id: 'house-deep-cleaning', name: '2 Bedroom deep clean', rule: 'FIXED', price: 5500 },
+  { id: 'laundry', name: 'Laundry', rule: 'PER_KG', price: 200 },
+  { id: 'carpet-cleaning', name: 'Carpet cleaning', rule: 'PER_SQM', price: 300 },
+  { id: 'small-office-cleaning', name: 'Small office cleaning', rule: 'FIXED', price: 2500 },
 ];
 const localOrdersPath = path.join(__dirname, 'orders.json');
 const localOrders = fs.existsSync(localOrdersPath) ? JSON.parse(fs.readFileSync(localOrdersPath, 'utf8')) : [];

@@ -32,17 +32,53 @@ const serviceImages = {
 }
 const apiBase = import.meta.env.VITE_API_URL || 'http://localhost:4000'
 const pricing = [
-  { service: 'House deep-cleaning', unit: 'per visit', price: 3500, description: 'Kitchen, bathrooms, living spaces and bedrooms.' },
-  { service: 'Laundry', unit: 'per kilogram', price: 250, description: 'Wash, dry and fold with careful sorting.' },
-  { service: 'Carpet cleaning', unit: 'per square metre', price: 180, description: 'Deep extraction and stain treatment.' },
-  { service: 'Office cleaning contract', unit: 'per month', price: 15000, description: 'Reliable recurring care for productive offices.' },
+  { service: '2 Bedroom deep clean', unit: 'per visit', price: 5500, description: 'Current guide price for a two-bedroom deep clean.' },
+  { service: 'Laundry', unit: 'per kilogram', price: 200, description: 'Standard wash, dry and fold from KSh 200 per kg.' },
+  { service: 'Carpet cleaning', unit: 'per square metre', price: 300, description: 'Deep carpet cleaning at KSh 300 per square metre.' },
+  { service: 'Small office cleaning', unit: 'per visit', price: 2500, description: 'Up to five rooms, from KSh 2,500 per visit.' },
+]
+const pricingSections = [
+  { title: 'House Cleaning', rows: [
+    ['Bed-sitter / Studio', 'KSh 1,500 standard · KSh 2,500 deep clean'],
+    ['1 Bedroom', 'KSh 2,500 standard · KSh 3,500 deep clean'],
+    ['2 Bedroom', 'KSh 3,500 standard · KSh 5,500 deep clean'],
+    ['3 Bedroom', 'KSh 4,800 standard · KSh 6,500 deep clean'],
+    ['4 Bedroom', 'KSh 6,000 standard · KSh 9,000 deep clean'],
+    ['5 Bedroom', 'KSh 7,500 standard · KSh 11,000 deep clean'],
+    ['Large House / Villa', 'From KSh 8,500 standard · From KSh 13,500 deep clean'],
+  ] },
+  { title: 'Individual Services', rows: [
+    ['Kitchen cleaning', 'KSh 1,000-2,000'], ['Bathroom / Washroom', 'KSh 700-1,500'], ['Floor scrubbing', 'From KSh 1,500'],
+    ['Window cleaning', 'KSh 150-250 per window'], ['Compound cleaning', 'From KSh 1,500'], ['Balcony cleaning', 'From KSh 500'],
+    ['Kitchen appliances', 'From KSh 500 each'], ['Wall cleaning', 'From KSh 1,000'],
+  ] },
+  { title: 'Carpet & Furniture Cleaning', rows: [
+    ['Carpet cleaning', 'KSh 300 per m2'], ['Dining chair', 'KSh 400 each'], ['Office chair', 'KSh 500 each'],
+    ['1-seater sofa', 'KSh 500'], ['2-seater sofa', 'KSh 1,000'], ['3-seater sofa', 'KSh 1,500'],
+    ['5-seater sofa', 'KSh 2,500'], ['6-seater sofa', 'KSh 3,000'], ['L-shaped sofa', 'From KSh 3,500'],
+  ] },
+  { title: 'Package Deals', rows: [
+    ['Basic Home', 'KSh 3,000 · Dusting, sweeping, mopping, kitchen & bath'],
+    ['Premium Home', 'KSh 4,500 · Full deep clean, floor scrub, windows'],
+    ['Move-In / Out', 'From KSh 6,000 · Full property deep clean'],
+  ] },
+  { title: 'Commercial, Office & Laundry', rows: [
+    ['Small office (up to 5 rooms)', 'From KSh 2,500 per visit'], ['Medium office (6-15 rooms)', 'From KSh 4,500 per visit'],
+    ['Large office (15+ rooms)', 'Quote after inspection'], ['Monthly contract', 'Quote after inspection'],
+    ['Event setup & cleanup', 'Quote after inspection'], ['Post-construction', 'Quote after inspection'],
+    ['Standard wash, dry & fold', 'KSh 200-250 per kg'], ['Wash, dry, iron & fold', 'KSh 250-300 per kg'],
+    ['Express (24-hour)', '+50% surcharge'], ['Commercial bulk', 'Quote after inspection'],
+  ] },
 ]
 const testimonials = [
-  { quote: 'CarlTech cleaned my 3-seater sofa - removed a stain I thought would never go. It looks brand new. Very professional!', name: 'Mary Wambui', area: 'Mombasa', initial: 'M' },
-  { quote: 'Brought my office carpets and floor mats - spotlessly clean within hours. Great service, transparent pricing and on time!', name: 'John Kamau', area: 'Mombasa County', initial: 'J' },
-  { quote: 'I love the instant confirmation email - so organised! My clothes come back fresh and neatly folded every time. Highly recommend.', name: 'Faith Njeri', area: 'Kisauni', initial: 'F' },
+  { quote: 'Safi Squad restored my 3-seater sofa and removed a stain I thought would never go. It looks brand new and the team was very professional!', name: 'Rajab Abdallah', area: 'Old Town, Mvita', initial: 'R' },
+  { quote: 'Safi Squad made our office carpets and floor mats spotless within hours. Great office care, clear pricing and dependable timing!', name: 'Khadija Ali', area: 'Kisauni', initial: 'K' },
+  { quote: 'My clothes come back fresh, neatly folded and beautifully pressed every time. Safi Squad makes laundry and garment care so easy!', name: 'Emmanuel Maingi', area: 'Changamwe', initial: 'E' },
+  { quote: 'The Safi Squad team gave my home a thorough deep clean, including the kitchen and bathroom. Everything felt fresh and carefully finished.', name: 'Mwanaisha Salim', area: 'Nyali', initial: 'M' },
+  { quote: 'From windows and the compound to the final tidy-up, Safi Squad handled every detail with care. Excellent service from start to finish!', name: 'Faith Pade', area: 'Liikoni', initial: 'F' },
+  { quote: 'Reliable pickup and delivery, careful shoe and garment care, and friendly service throughout. Safi Squad returned everything fresh and ready to use.', name: 'Issa Mwite', area: 'Jomvu', initial: 'I' },
 ]
-const formatMoney = (amount) => `KES ${Number(amount).toLocaleString()}`
+const formatMoney = (amount) => `KSh ${Number(amount).toLocaleString()}`
 
 function App() {
   const [content, setContent] = useState(fallbackContent)
@@ -59,7 +95,7 @@ function App() {
   const [trackedOrder, setTrackedOrder] = useState(null)
   const [trackingError, setTrackingError] = useState('')
   const [orders, setOrders] = useState([])
-  const [calculator, setCalculator] = useState([{ service: 'House deep-cleaning', quantity: 1 }])
+  const [calculator, setCalculator] = useState([{ service: '2 Bedroom deep clean', quantity: 1 }])
   const [currentPage, setCurrentPage] = useState(() => ({ '/privacy-policy': 'privacy', '/terms': 'terms', '/faq': 'faq' }[window.location.pathname] || 'home'))
   const [cookieConsent, setCookieConsent] = useState(() => localStorage.getItem('cookie-consent') === 'accepted')
   const [showCookieBanner, setShowCookieBanner] = useState(() => !localStorage.getItem('cookie-consent'))
@@ -136,7 +172,7 @@ function App() {
       <section className="trust-strip"><p>SAFISQUAD'S HYBRID CLEANING AND GARMENT CARE SERVICE</p><div><strong>5+</strong><span>years of care</span></div><div><strong>{content.cities}</strong><span>subcounties served</span></div><div><strong>{content.stores}+</strong><span>stores across Mombasa</span></div><div><strong>{content.garments}</strong><span>garments weekly</span></div></section>
       <section className="intro section"><div className="section-label">01 / WHAT WE DO</div><div className="intro-grid"><h2>Your precious clothes<br />and environments,<br /><em>our devoted care.</em></h2><div><p>We handle couture, heirlooms and your most treasured garments. Whether it is a cherished saree, a wedding lehenga, or your favourite designer outfit, we treat every garment and surrounding with the care it deserves.</p><a className="arrow-link" href="#how-it-works">Our story <span>↗</span></a></div></div></section>
       <section className="services section" id="services"><div className="section-label">02 / OUR SERVICES</div><div className="section-heading"><h2>Care<br /><em>your way.</em></h2><p>Professional garment care off-site and specialized cleaning services on-site for Airbnbs, toilets and offices.</p></div><div className="service-grid">{content.services.map((service, index) => <article className="service-card" key={service}><span className="service-number">{String(index + 1).padStart(2, '0')}</span><div className="service-art"><img src={serviceImages[service]} alt={service} loading="lazy" decoding="async" style={{width: '100%', height: '100%', objectFit: 'cover'}} /></div><h3>{service}</h3><p>{serviceDescriptions[service] || 'Thoughtful cleaning and care delivered with signature attention.'}</p><button onClick={() => openBooking(service)}>Book this service <span>↗</span></button></article>)}</div></section>
-      <section className="pricing-section section" id="pricing"><div className="section-label">02A / CLEAR PRICING</div><div className="section-heading"><h2>Know the cost<br /><em>before you book.</em></h2><p>Simple starting rates in Kenyan shillings. Add several services to see one live guide price.</p></div><div className="price-grid">{pricing.map((item) => <article className="price-card" key={item.service}><span>{item.unit}</span><h3>{item.service}</h3><strong>{formatMoney(item.price)}</strong><p>{item.description}</p><button onClick={() => openBooking(item.service)}>Book service <span>↗</span></button></article>)}</div><div className="calculator"><div><div className="section-label">QUICK ESTIMATE</div><h3>Build your estimate</h3><p>Add every service you need and adjust its quantity.</p><button className="calculator-add" type="button" onClick={addCalculatorLine}>+ Add another service</button></div><div className="calculator-lines">{calculator.map((item, index) => <div className="calculator-line" key={`${item.service}-${index}`}><label>Service<select value={item.service} onChange={(event) => updateCalculatorLine(index, 'service', event.target.value)}>{pricing.map((entry) => <option key={entry.service}>{entry.service}</option>)}</select></label><label>Quantity<input type="number" min="1" value={item.quantity} onChange={(event) => updateCalculatorLine(index, 'quantity', event.target.value)} /></label>{calculator.length > 1 && <button type="button" className="calculator-remove" onClick={() => setCalculator(calculator.filter((_, itemIndex) => itemIndex !== index))} aria-label={`Remove ${item.service}`}>×</button>}</div>)}</div><div className="estimate"><span>Estimated total</span><strong>{formatMoney(estimate)}</strong><small>{calculator.length} service line{calculator.length === 1 ? '' : 's'}</small></div></div></section>
+      <section className="pricing-section section" id="pricing"><div className="section-label">02A / CLEAR PRICING</div><div className="section-heading"><h2>Know the cost<br /><em>before you book.</em></h2><p>Updated September 2026 pricing in Kenyan shillings. Variable services are marked clearly and larger jobs may require inspection.</p></div><div className="price-list">{pricingSections.map((section) => <div className="price-group" key={section.title}><h3>{section.title}</h3><div>{section.rows.map(([service, price]) => <article className="price-row" key={service}><strong>{service}</strong><span>{price}</span></article>)}</div></div>)}</div><div className="pricing-notes"><strong>Service rules</strong><span>Free transport within 5km · KSh 50/km beyond</span><span>Minimum call-out: KSh 1,500 · Inspection quotes valid for 14 days</span><span>Monthly contracts: 12% discount with advance payment · New customers: 50% deposit</span><span>Cancellation requires 4 hours notice · Report re-clean requests within 24 hours</span></div><div className="calculator"><div><div className="section-label">QUICK ESTIMATE</div><h3>Build your estimate</h3><p>Use current starting rates for a quick guide. Final quotes apply where noted above.</p><button className="calculator-add" type="button" onClick={addCalculatorLine}>+ Add another service</button></div><div className="calculator-lines">{calculator.map((item, index) => <div className="calculator-line" key={`${item.service}-${index}`}><label>Service<select value={item.service} onChange={(event) => updateCalculatorLine(index, 'service', event.target.value)}>{pricing.map((entry) => <option key={entry.service}>{entry.service}</option>)}</select></label><label>Quantity<input type="number" min="1" value={item.quantity} onChange={(event) => updateCalculatorLine(index, 'quantity', event.target.value)} /></label>{calculator.length > 1 && <button type="button" className="calculator-remove" onClick={() => setCalculator(calculator.filter((_, itemIndex) => itemIndex !== index))} aria-label={`Remove ${item.service}`}>×</button>}</div>)}</div><div className="estimate"><span>Estimated total</span><strong>{formatMoney(estimate)}</strong><small>{calculator.length} service line{calculator.length === 1 ? '' : 's'}</small></div></div></section>
       <section className="tracking-section section" id="tracking"><div className="section-label">02B / ORDER TRACKING</div><div className="tracking-grid"><div><h2>See every step<br /><em>of the journey.</em></h2><p>Enter the tracking code from your booking confirmation to see the live care status.</p><form className="tracking-form" onSubmit={lookupOrder}><input aria-label="Tracking code" required value={trackingCode} onChange={(event) => setTrackingCode(event.target.value)} placeholder="SQ-XXXXXXXX" /><button className="button dark">Track order <span>↗</span></button></form>{trackingError && <p className="form-error" role="alert">{trackingError}</p>}{trackedOrder && <div className="order-result"><strong>{trackedOrder.tracking_code}</strong><span>{trackedOrder.service} · {formatMoney(trackedOrder.estimated_cost)}</span><OrderTimeline status={trackedOrder.status} events={trackedOrder.events} /></div>}</div><div className="trust-panel"><span>YOUR DETAILS STAY VISIBLE</span><h3>One record from booking to delivery.</h3><p>Your address, requested service, estimate and status history are stored together for the care team and customer.</p></div></div></section>
       <section className="split-section" id="how-it-works"><div className="split-image"><img src="/assets/work-img-1.jpg" alt="Safi Squad pickup and delivery process illustration showing how our cleaning service works" /></div><div className="split-copy"><div className="section-label">03 / HOW IT WORKS</div><h2>Clean garments,<br /><em>zero effort.</em></h2><div className="steps"><Step number="01" title="Schedule online" text="Choose pickup and drop-off times that work best for you." /><Step number="02" title="We pick up" text="A Safi Squad agent collects your garments from your doorstep." /><Step number="03" title="We deliver" text="Your garments return clean, fresh and wrinkle-free." /></div><button className="button outline" onClick={() => openBooking()}>Start with a pickup <span>↗</span></button></div></section>
       <section className="care-section section"><div className="section-label">04 / CARE THAT FITS YOU</div><h2>Because every garment<br /><em>has its own story.</em></h2><div className="care-grid"><Care title="Regular" text="Thoughtful care, right on time. Everyday garments handled with signature attention." image="care-img-1.svg" /><Care title="Express" text="When you need it fresh, fast and flawless, for life's last-minute plans." image="care-img-2.svg" /><Care title="Premium" text="For garments that cannot afford shortcuts. Reserved for your most prized pieces." image="care-img-3.svg" /></div></section>
