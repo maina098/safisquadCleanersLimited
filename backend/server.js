@@ -5,7 +5,9 @@ const path = require('path');
 const cors = require('cors');
 const express = require('express');
 const pool = require('./db');
-const { hashPassword, verifyPassword, issueToken, authGuard } = require('./security');
+const { hashPassword, verifyPassword, issueToken, authGuard, normalizeRole } = require('./security');
+const { calculateServiceAmount, normalizeOrderInput, ORDER_STATUS_SEQUENCE } = require('./validators');
+const { buildAdminOverview, buildSettlementPlan, summarizeAuditLogs } = require('./ops');
 const twilio = require('twilio');
 const nodemailer = require('nodemailer');
 const QRCode = require('qrcode');
@@ -28,13 +30,24 @@ const localWorkflowPath = path.join(__dirname, 'workflow.json');
 const localWorkflow = fs.existsSync(localWorkflowPath) ? JSON.parse(fs.readFileSync(localWorkflowPath, 'utf8')) : [];
 const localPayoutsPath = path.join(__dirname, 'payouts.json');
 const localPayouts = fs.existsSync(localPayoutsPath) ? JSON.parse(fs.readFileSync(localPayoutsPath, 'utf8')) : [];
+const localAuditPath = path.join(__dirname, 'audit.json');
+const localAuditLogs = fs.existsSync(localAuditPath) ? JSON.parse(fs.readFileSync(localAuditPath, 'utf8')) : [];
 const usingLocalStorage = !process.env.DATABASE_URL;
 
 function saveLocalOrders() { fs.writeFileSync(localOrdersPath, JSON.stringify(localOrders, null, 2)); }
 function saveLocalUsers() { fs.writeFileSync(localUsersPath, JSON.stringify(localUsers, null, 2)); }
 function saveLocalWorkflow() { fs.writeFileSync(localWorkflowPath, JSON.stringify(localWorkflow, null, 2)); }
 function saveLocalPayouts() { fs.writeFileSync(localPayoutsPath, JSON.stringify(localPayouts, null, 2)); }
-function calculateOrderTotal(serviceId, quantity) { const service = serviceCatalog.find((item) => item.id === serviceId); if (!service) return null; return { service, total: service.price * Math.max(1, Number(quantity) || 1) }; }
+function saveLocalAudit() { fs.writeFileSync(localAuditPath, JSON.stringify(localAuditLogs, null, 2)); }
+function logAudit(actorId, action, entityType, entityId, metadata = {}) {
+  const entry = { id: Date.now() + Math.random(), actor_id: actorId || null, action, entity_type: entityType, entity_id: String(entityId || ''), metadata, created_at: new Date().toISOString() };
+  if (usingLocalStorage) {
+    localAuditLogs.unshift(entry); saveLocalAudit();
+    return entry;
+  }
+  return pool.query('INSERT INTO audit_logs (actor_id, action, entity_type, entity_id, metadata) VALUES ($1, $2, $3, $4, $5)', [actorId || null, action, entityType, entityId || null, JSON.stringify(metadata || {})]);
+}
+function calculateOrderTotal(serviceId, quantity) { return calculateServiceAmount(serviceId, quantity); }
 async function notifyOperations(order) {
   const results = { email: 'NOT_CONFIGURED', sms: 'NOT_CONFIGURED' };
   const services = Array.isArray(order.services) ? order.services : [order.service];
@@ -101,7 +114,7 @@ async function ensureSchema() {
 
 async function seedLocalAdmin() {
   if (localUsers.length || !process.env.ADMIN_EMAIL || !process.env.ADMIN_PASSWORD) return;
-  localUsers.push({ id: 1, email: process.env.ADMIN_EMAIL.toLowerCase(), password_hash: await hashPassword(process.env.ADMIN_PASSWORD), role: 'ADMIN', created_at: new Date().toISOString() });
+  localUsers.push({ id: 1, email: process.env.ADMIN_EMAIL.toLowerCase(), password_hash: await hashPassword(process.env.ADMIN_PASSWORD), role: 'SUPER_ADMIN', created_at: new Date().toISOString() });
   saveLocalUsers();
 }
 
@@ -174,27 +187,58 @@ app.post('/api/users', authGuard(['ADMIN']), async (request, response) => {
 });
 
 app.post('/api/orders', async (request, response) => {
-  const { name, phone, email, address, building, room, floor, preferredDate, preferredTime, serviceId, service, services = [], details, quantity, estimatedCost } = request.body;
+  const validation = normalizeOrderInput(request.body || {});
+  if (!validation.ok) {
+    return response.status(400).json({ error: validation.errors[0] || 'The booking information is incomplete.' });
+  }
+
+  const { name, phone, email, address, building, room, floor, preferredDate, preferredTime, serviceId, service, services = [], details, quantity } = request.body;
   const requestedServices = Array.isArray(services) ? services.filter(Boolean) : [service].filter(Boolean);
   const pickupAddress = address || [building, room, floor].filter(Boolean).join(', ');
-  if (!name || !phone || !email || !pickupAddress || !building || !room || !preferredDate || !preferredTime || !requestedServices.length) {
-    return response.status(400).json({ error: 'Name, phone, email, pickup details, preferred date and time, and at least one service are required.' });
-  }
-  const selectedService = service || requestedServices[0];
-  const selected = calculateOrderTotal(serviceId || serviceCatalog.find((item) => item.name === selectedService)?.id || 'house-deep-cleaning', quantity);
+  const selectedService = service || requestedServices[0] || validation.data.service;
+  const selected = calculateOrderTotal(serviceId || validation.data.serviceId || 'house-deep-cleaning', quantity || validation.data.quantity);
   if (!selected) return response.status(400).json({ error: 'Unknown service.' });
-  const total = requestedServices.reduce((sum, requestedService) => { const match = serviceCatalog.find((item) => item.name === requestedService); return sum + (match ? match.price * Math.max(1, Number(quantity) || 1) : 0) }, 0) || selected.total;
+
+  const total = requestedServices.reduce((sum, requestedService) => {
+    const match = serviceCatalog.find((item) => item.name === requestedService || item.id === requestedService);
+    return sum + (match ? match.price * Math.max(1, Number(quantity) || 1) : 0);
+  }, 0) || selected.total;
   const serviceDetails = { building, room, floor: floor || '', preferredTime, notes: details || '', services: requestedServices };
   const customerIsNew = usingLocalStorage ? !localOrders.some((item) => item.phone === phone) : (await pool.query('SELECT 1 FROM orders WHERE phone = $1 LIMIT 1', [phone])).rowCount === 0;
   const depositPaid = customerIsNew ? total * 0.5 : 0;
+
   if (usingLocalStorage) {
     const now = new Date().toISOString();
-    const order = { id: localOrders.length + 1, tracking_code: `SQ-${Date.now().toString(36).toUpperCase()}`, customer_name: name, phone, email, address: pickupAddress, preferred_date: preferredDate, service: requestedServices.join(', '), services: requestedServices, service_id: selected.service.id, service_details: serviceDetails, quantity: Number(quantity) || 1, estimated_cost: total, deposit_paid: depositPaid, customer_is_new: customerIsNew, status: 'Pending', created_at: now, updated_at: now, events: [{ status: 'Pending', note: 'Booking received', created_at: now }], workflow_steps: [{ status: 'Pending', started_at: now }], photos: [] };
+    const order = {
+      id: localOrders.length + 1,
+      tracking_code: `SQ-${Date.now().toString(36).toUpperCase()}`,
+      customer_name: name,
+      phone,
+      email,
+      address: pickupAddress,
+      preferred_date: preferredDate,
+      service: requestedServices.join(', ') || selected.service.name,
+      services: requestedServices.length ? requestedServices : [selected.service.name],
+      service_id: selected.service.id,
+      service_details: serviceDetails,
+      quantity: Number(quantity) || validation.data.quantity,
+      estimated_cost: total,
+      deposit_paid: depositPaid,
+      customer_is_new: customerIsNew,
+      status: 'Pending',
+      created_at: now,
+      updated_at: now,
+      events: [{ status: 'Pending', note: 'Booking received', created_at: now }],
+      workflow_steps: [{ status: 'Pending', started_at: now }],
+      photos: [],
+    };
     localOrders.unshift(order); saveLocalOrders();
+    logAudit(null, 'ORDER_CREATED', 'ORDER', order.tracking_code, { customerName: name, total, trackingCode: order.tracking_code });
     if (depositPaid > 0) triggerMpesaStk(phone, depositPaid, order.tracking_code).catch((error) => console.error('M-Pesa STK request failed', error.message));
     const notification = await notifyOperations(order);
     return response.status(201).json({ order, notification });
   }
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -202,12 +246,13 @@ app.post('/api/orders', async (request, response) => {
     const orderResult = await client.query(
       `INSERT INTO orders (tracking_code, customer_name, phone, email, address, preferred_date, service, service_details, quantity, estimated_cost, deposit_paid)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
-      [trackingCode, name, phone, email, pickupAddress, preferredDate, requestedServices.join(', '), JSON.stringify(serviceDetails), Number(quantity) || 1, total, depositPaid],
+      [trackingCode, name, phone, email, pickupAddress, preferredDate, requestedServices.join(', ') || selected.service.name, JSON.stringify(serviceDetails), Number(quantity) || validation.data.quantity, total, depositPaid],
     );
     const order = orderResult.rows[0];
     await client.query('INSERT INTO order_events (order_id, status, note) VALUES ($1, $2, $3)', [order.id, 'Pending', 'Booking received']);
     await client.query('INSERT INTO workflow_steps (order_id, status, actor_id, note) VALUES ($1, $2, $3, $4)', [order.id, 'Pending', null, 'Booking received']);
     await client.query('INSERT INTO payments (order_id, amount, type, status) VALUES ($1, $2, $3, $4)', [order.id, depositPaid, 'DEPOSIT', 'PENDING']);
+    await client.query('INSERT INTO audit_logs (actor_id, action, entity_type, entity_id, metadata) VALUES ($1, $2, $3, $4, $5)', [null, 'ORDER_CREATED', 'ORDER', String(order.id), JSON.stringify({ trackingCode, total, customerName: name })]);
     await client.query('COMMIT');
     if (depositPaid > 0) triggerMpesaStk(phone, depositPaid, order.tracking_code).catch((error) => console.error('M-Pesa STK request failed', error.message));
     const notification = await notifyOperations({ ...order, services: requestedServices, service_details: serviceDetails });
@@ -253,21 +298,26 @@ app.get('/api/orders/:id/qr', authGuard(['ADMIN', 'MEMBER']), async (request, re
   response.json({ orderId: Number(request.params.id), qrDataUrl: qr });
 });
 
-app.patch('/api/orders/:id/status', authGuard(['ADMIN', 'MEMBER']), async (request, response) => {
+app.patch('/api/orders/:id/status', authGuard(['ADMIN', 'MEMBER', 'FINANCE_OFFICER']), async (request, response) => {
   const { status, note } = request.body;
   if (!orderStatuses.includes(status)) return response.status(400).json({ error: 'Invalid order status.' });
   if (usingLocalStorage) {
     const order = localOrders.find((item) => item.id === Number(request.params.id));
     if (!order) return response.status(404).json({ error: 'Order not found.' });
-    order.status = status; order.updated_at = new Date().toISOString(); order.events.push({ status, note: note || `Status updated to ${status}`, created_at: order.updated_at }); saveLocalOrders();
+    const previousStatus = order.status;
+    order.status = status; order.updated_at = new Date().toISOString(); order.events.push({ status, note: note || `Status updated to ${status}`, created_at: order.updated_at });
+    saveLocalOrders();
+    logAudit(request.user.userId, 'ORDER_STATUS_UPDATED', 'ORDER', order.id, { previousStatus, currentStatus: status, note: note || `Status updated to ${status}` });
     return response.json({ order });
   }
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    const previous = await client.query('SELECT status FROM orders WHERE id = $1', [request.params.id]);
     const result = await client.query('UPDATE orders SET status = $1, updated_at = NOW() WHERE id = $2 RETURNING *', [status, request.params.id]);
     if (!result.rowCount) { await client.query('ROLLBACK'); return response.status(404).json({ error: 'Order not found.' }); }
     await client.query('INSERT INTO order_events (order_id, status, note) VALUES ($1, $2, $3)', [request.params.id, status, note || `Status updated to ${status}`]);
+    await client.query('INSERT INTO audit_logs (actor_id, action, entity_type, entity_id, metadata) VALUES ($1, $2, $3, $4, $5)', [request.user.userId, 'ORDER_STATUS_UPDATED', 'ORDER', request.params.id, JSON.stringify({ previousStatus: previous.rows[0]?.status, currentStatus: status, note: note || `Status updated to ${status}` })]);
     await client.query('COMMIT');
     response.json({ order: result.rows[0] });
   } catch (error) { await client.query('ROLLBACK'); response.status(500).json({ error: 'Could not update the order.' }); }
@@ -303,10 +353,44 @@ app.patch('/api/orders/:id/workflow', authGuard(['ADMIN', 'MEMBER']), async (req
   finally { client.release(); }
 });
 
+app.get('/api/admin/overview', authGuard(['ADMIN', 'MEMBER', 'FINANCE_OFFICER']), async (_request, response) => {
+  const orders = usingLocalStorage ? localOrders : (await pool.query('SELECT * FROM orders')).rows;
+  const overview = buildAdminOverview(orders);
+  response.json({ ...overview });
+});
+
+app.get('/api/admin/audit', authGuard(['ADMIN', 'MEMBER', 'FINANCE_OFFICER']), async (_request, response) => {
+  if (usingLocalStorage) {
+    const summary = summarizeAuditLogs(localAuditLogs.slice(0, 50));
+    return response.json({ audit: localAuditLogs.slice(0, 50), summary });
+  }
+  const result = await pool.query('SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 50');
+  response.json({ audit: result.rows, summary: summarizeAuditLogs(result.rows) });
+});
+
+app.get('/api/admin/metrics', authGuard(['ADMIN', 'MEMBER', 'FINANCE_OFFICER']), async (_request, response) => {
+  const orders = usingLocalStorage ? localOrders : (await pool.query('SELECT * FROM orders')).rows;
+  const overview = buildAdminOverview(orders);
+  const counts = overview.statusBreakdown;
+  const health = {
+    onTrack: Math.max(0, Math.round((Number(counts['Delivered'] || 0) / Math.max(1, overview.totalOrders)) * 100)),
+    staffing: Math.max(0, 100 - Math.min(80, overview.pendingPickup * 12)),
+    backlog: Math.max(0, overview.activeOrders - overview.qcQueue),
+  };
+  response.json({ overview, health, lastUpdated: new Date().toISOString() });
+});
+
 app.get('/api/settlements', authGuard(['ADMIN', 'FINANCE_OFFICER']), async (_request, response) => {
-  if (usingLocalStorage) return response.json({ payouts: localPayouts });
+  if (usingLocalStorage) {
+    const settlements = localPayouts.map((item) => ({
+      ...item.settlement,
+      payouts: item.payouts || [],
+      approval_required: item.approval_required || true,
+    }));
+    return response.json({ settlements, summary: { totalSettlements: settlements.length, totalDistributable: settlements.reduce((sum, item) => sum + Number(item.distributable_amount || 0), 0) } });
+  }
   const result = await pool.query(`SELECT sr.*, COALESCE(json_agg(p ORDER BY p.amount DESC) FILTER (WHERE p.id IS NOT NULL), '[]') AS payouts FROM settlement_runs sr LEFT JOIN payouts p ON p.week_start = sr.week_start GROUP BY sr.id ORDER BY sr.created_at DESC`);
-  response.json({ settlements: result.rows });
+  response.json({ settlements: result.rows, summary: { totalSettlements: result.rowCount, totalDistributable: result.rows.reduce((sum, item) => sum + Number(item.distributable_amount || 0), 0) } });
 });
 
 app.post('/api/settlements/:weekStart/calculate', authGuard(['ADMIN', 'FINANCE_OFFICER']), async (request, response) => {
@@ -314,28 +398,40 @@ app.post('/api/settlements/:weekStart/calculate', authGuard(['ADMIN', 'FINANCE_O
   const revenue = Number(request.body.revenue) || 0;
   const restockAllocation = Number(request.body.restockAllocation) || 0;
   const contingencyBuffer = Number(request.body.contingencyBuffer) || 0;
-  const growthFund = Math.max(0, revenue - restockAllocation - contingencyBuffer) * 0.15;
-  const distributableAmount = Math.max(0, revenue - restockAllocation - contingencyBuffer - growthFund);
-  const run = { id: Date.now(), week_start: weekStart, revenue, restock_allocation: restockAllocation, contingency_buffer: contingencyBuffer, growth_fund: growthFund, distributable_amount: distributableAmount, status: 'PENDING_REVIEW', created_at: new Date().toISOString() };
-  let memberHours = Array.isArray(request.body.memberHours) ? request.body.memberHours : [];
-  if (!usingLocalStorage) memberHours = (await pool.query('SELECT user_id, hours FROM staff_hours WHERE week_start = $1', [weekStart])).rows;
-  const totalHours = memberHours.reduce((sum, item) => sum + Number(item.hours || 0), 0);
-  const payouts = memberHours.map((item) => ({ user_id: Number(item.user_id), week_start: weekStart, hours: Number(item.hours || 0), amount: totalHours ? distributableAmount * Number(item.hours || 0) / totalHours : 0, status: 'PENDING_REVIEW' }));
-  if (usingLocalStorage) { localPayouts.unshift({ settlement: run, payouts, approval_required: true }); saveLocalPayouts(); return response.status(201).json({ settlement: run, payouts, approval_required: true }); }
-  const result = await pool.query('INSERT INTO settlement_runs (week_start, revenue, restock_allocation, contingency_buffer, growth_fund, distributable_amount) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *', [weekStart, revenue, restockAllocation, contingencyBuffer, growthFund, distributableAmount]);
+  const memberHours = Array.isArray(request.body.memberHours) ? request.body.memberHours : [];
+  const plan = buildSettlementPlan({ revenue, restockAllocation, contingencyBuffer, memberHours });
+  const run = { id: Date.now(), week_start: weekStart, revenue: plan.revenue, restock_allocation: plan.restockAllocation, contingency_buffer: plan.contingencyBuffer, growth_fund: plan.growthFund, distributable_amount: plan.distributableAmount, status: 'PENDING_REVIEW', created_at: new Date().toISOString() };
+  const payouts = plan.payouts.map((item) => ({ user_id: Number(item.user_id), week_start: weekStart, hours: Number(item.hours || 0), amount: Number(item.amount || 0), status: 'PENDING_REVIEW' }));
+  if (usingLocalStorage) { localPayouts.unshift({ settlement: run, payouts, approval_required: true }); saveLocalPayouts(); return response.status(201).json({ settlement: run, payouts, approval_required: true, plan }); }
+  const result = await pool.query('INSERT INTO settlement_runs (week_start, revenue, restock_allocation, contingency_buffer, growth_fund, distributable_amount) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *', [weekStart, plan.revenue, plan.restockAllocation, plan.contingencyBuffer, plan.growthFund, plan.distributableAmount]);
   for (const payout of payouts) await pool.query('INSERT INTO payouts (user_id, week_start, amount, status) VALUES ($1,$2,$3,$4)', [payout.user_id, weekStart, payout.amount, 'PENDING_REVIEW']);
-  response.status(201).json({ settlement: result.rows[0], payouts, approval_required: true });
+  response.status(201).json({ settlement: result.rows[0], payouts, approval_required: true, plan });
 });
 
 app.post('/api/settlements/:id/approve', authGuard(['ADMIN', 'FINANCE_OFFICER']), async (request, response) => {
   if (usingLocalStorage) {
     const run = localPayouts.find((item) => item.settlement.id === Number(request.params.id));
     if (!run) return response.status(404).json({ error: 'Settlement not found.' });
-    run.settlement.status = 'APPROVED'; run.settlement.approved_at = new Date().toISOString(); run.settlement.approved_by = request.user.userId; saveLocalPayouts(); return response.json({ settlement: run.settlement, disbursement: 'READY_FOR_B2C_REVIEW' });
+    run.settlement.status = 'APPROVED'; run.settlement.approved_at = new Date().toISOString(); run.settlement.approved_by = request.user.userId; saveLocalPayouts();
+    logAudit(request.user.userId, 'SETTLEMENT_APPROVED', 'SETTLEMENT', String(run.settlement.id), { approvedAmount: run.settlement.distributable_amount });
+    return response.json({ settlement: run.settlement, disbursement: 'READY_FOR_B2C_REVIEW' });
   }
   const result = await pool.query('UPDATE settlement_runs SET status = $1, approved_at = NOW(), approved_by = $2 WHERE id = $3 RETURNING *', ['APPROVED', request.user.userId, request.params.id]);
   if (!result.rowCount) return response.status(404).json({ error: 'Settlement not found.' });
+  await pool.query('INSERT INTO audit_logs (actor_id, action, entity_type, entity_id, metadata) VALUES ($1, $2, $3, $4, $5)', [request.user.userId, 'SETTLEMENT_APPROVED', 'SETTLEMENT', request.params.id, JSON.stringify({ approvedAmount: result.rows[0].distributable_amount })]);
   response.json({ settlement: result.rows[0], disbursement: 'READY_FOR_B2C_REVIEW' });
+});
+
+app.get('/api/admin/track/:trackingCode', async (request, response) => {
+  const trackingCode = String(request.params.trackingCode || '').toUpperCase();
+  if (!trackingCode) return response.status(400).json({ error: 'Tracking code is required.' });
+  const order = usingLocalStorage ? localOrders.find((item) => item.tracking_code === trackingCode) : (await pool.query('SELECT * FROM orders WHERE tracking_code = $1', [trackingCode])).rows[0];
+  if (!order) return response.status(404).json({ error: 'Order not found.' });
+  const events = usingLocalStorage ? (order.events || []) : (await pool.query('SELECT status, note, created_at FROM order_events WHERE order_id = $1 ORDER BY created_at ASC', [order.id])).rows;
+  const checkpoints = ['Pending', 'Picked Up', 'In-Progress', 'QC Passed', 'Out for Delivery', 'Delivered'];
+  const currentStage = checkpoints.includes(order.status) ? order.status : checkpoints[0];
+  const progress = Math.round(((checkpoints.indexOf(currentStage) + 1) / checkpoints.length) * 100);
+  response.json({ order, progress, checkpoints, events });
 });
 
 app.listen(port, async () => {
