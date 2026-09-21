@@ -8,6 +8,8 @@ const pool = require('./db');
 const { hashPassword, verifyPassword, issueToken, authGuard, normalizeRole } = require('./security');
 const { calculateServiceAmount, normalizeOrderInput, ORDER_STATUS_SEQUENCE } = require('./validators');
 const { buildAdminOverview, buildSettlementPlan, summarizeAuditLogs } = require('./ops');
+const { emit, subscribe, recentEvents, initializeRedis } = require('./events');
+const { assertTransition } = require('./orderStateMachine');
 const twilio = require('twilio');
 const nodemailer = require('nodemailer');
 const QRCode = require('qrcode');
@@ -32,6 +34,12 @@ const localPayoutsPath = path.join(__dirname, 'payouts.json');
 const localPayouts = fs.existsSync(localPayoutsPath) ? JSON.parse(fs.readFileSync(localPayoutsPath, 'utf8')) : [];
 const localAuditPath = path.join(__dirname, 'audit.json');
 const localAuditLogs = fs.existsSync(localAuditPath) ? JSON.parse(fs.readFileSync(localAuditPath, 'utf8')) : [];
+const localMessagesPath = path.join(__dirname, 'messages.json');
+const localMessages = fs.existsSync(localMessagesPath) ? JSON.parse(fs.readFileSync(localMessagesPath, 'utf8')) : [];
+const localPaymentsPath = path.join(__dirname, 'payments.json');
+const localPayments = fs.existsSync(localPaymentsPath) ? JSON.parse(fs.readFileSync(localPaymentsPath, 'utf8')) : [];
+const localSystemPath = path.join(__dirname, 'system.json');
+const localSystem = fs.existsSync(localSystemPath) ? JSON.parse(fs.readFileSync(localSystemPath, 'utf8')) : { maintenance: { enabled: false } };
 const usingLocalStorage = !process.env.DATABASE_URL;
 
 function saveLocalOrders() { fs.writeFileSync(localOrdersPath, JSON.stringify(localOrders, null, 2)); }
@@ -39,6 +47,23 @@ function saveLocalUsers() { fs.writeFileSync(localUsersPath, JSON.stringify(loca
 function saveLocalWorkflow() { fs.writeFileSync(localWorkflowPath, JSON.stringify(localWorkflow, null, 2)); }
 function saveLocalPayouts() { fs.writeFileSync(localPayoutsPath, JSON.stringify(localPayouts, null, 2)); }
 function saveLocalAudit() { fs.writeFileSync(localAuditPath, JSON.stringify(localAuditLogs, null, 2)); }
+function saveLocalMessages() { fs.writeFileSync(localMessagesPath, JSON.stringify(localMessages, null, 2)); }
+function saveLocalPayments() { fs.writeFileSync(localPaymentsPath, JSON.stringify(localPayments, null, 2)); }
+function saveLocalSystem() { fs.writeFileSync(localSystemPath, JSON.stringify(localSystem, null, 2)); }
+function departmentForRole(role) {
+  const normalized = normalizeRole(role);
+  if (normalized === 'SUPER_ADMIN' || normalized === 'ADMIN' || normalized === 'MANAGEMENT') return 'MANAGEMENT';
+  if (normalized === 'FINANCE' || normalized === 'FINANCE_OFFICER') return 'FINANCE';
+  if (['SECRETARIAT', 'PROMOTIONS', 'TECHNICAL'].includes(normalized)) return normalized;
+  return 'SECRETARIAT';
+}
+const roleEvents = {
+  SECRETARIAT: ['order.*', 'payment.*', 'query.*', 'system.*'],
+  FINANCE: ['order.delivered', 'payment.*', 'query.*', 'system.*'],
+  MANAGEMENT: ['*'],
+  PROMOTIONS: ['order.*', 'promo.*', 'health.*', 'system.*'],
+  TECHNICAL: ['health.*', 'system.*', 'order.status_changed'],
+};
 function logAudit(actorId, action, entityType, entityId, metadata = {}) {
   const entry = { id: Date.now() + Math.random(), actor_id: actorId || null, action, entity_type: entityType, entity_id: String(entityId || ''), metadata, created_at: new Date().toISOString() };
   if (usingLocalStorage) {
@@ -48,6 +73,16 @@ function logAudit(actorId, action, entityType, entityId, metadata = {}) {
   return pool.query('INSERT INTO audit_logs (actor_id, action, entity_type, entity_id, metadata) VALUES ($1, $2, $3, $4, $5)', [actorId || null, action, entityType, entityId || null, JSON.stringify(metadata || {})]);
 }
 function calculateOrderTotal(serviceId, quantity) { return calculateServiceAmount(serviceId, quantity); }
+function paymentMetadata(callback) {
+  const items = callback?.CallbackMetadata?.Item || [];
+  return Object.fromEntries(items.map((item) => [item.Name, item.Value]));
+}
+function applyPaymentEvent(order, payment) {
+  const amount = Number(payment.amount || 0);
+  order.deposit_paid = Number(order.deposit_paid || 0) + amount;
+  order.updated_at = new Date().toISOString();
+  emit('payment.received', { orderId: order.id, trackingCode: order.tracking_code, amount, reference: payment.provider_reference });
+}
 async function notifyOperations(order) {
   const results = { email: 'NOT_CONFIGURED', sms: 'NOT_CONFIGURED' };
   const services = Array.isArray(order.services) ? order.services : [order.service];
@@ -100,7 +135,8 @@ async function ensureSchema() {
       id SERIAL PRIMARY KEY, order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
       status VARCHAR(40) NOT NULL, note TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
-    CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, email VARCHAR(255) UNIQUE NOT NULL, password_hash VARCHAR(255) NOT NULL, role VARCHAR(40) NOT NULL, phone VARCHAR(40), created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+    CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, email VARCHAR(255) UNIQUE NOT NULL, password_hash VARCHAR(255) NOT NULL, role VARCHAR(40) NOT NULL, phone VARCHAR(40), name VARCHAR(120), created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS name VARCHAR(120);
     CREATE TABLE IF NOT EXISTS workflow_steps (id SERIAL PRIMARY KEY, order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE, status VARCHAR(40) NOT NULL, started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), completed_at TIMESTAMPTZ, actor_id INTEGER REFERENCES users(id), note TEXT);
     CREATE TABLE IF NOT EXISTS order_photos (id SERIAL PRIMARY KEY, order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE, photo_type VARCHAR(20) NOT NULL, url TEXT NOT NULL, uploaded_by INTEGER REFERENCES users(id), created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
     CREATE TABLE IF NOT EXISTS payments (id SERIAL PRIMARY KEY, order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE, amount NUMERIC(10,2) NOT NULL, type VARCHAR(30) NOT NULL, status VARCHAR(30) NOT NULL DEFAULT 'PENDING', provider_reference VARCHAR(120), created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
@@ -109,6 +145,8 @@ async function ensureSchema() {
     CREATE TABLE IF NOT EXISTS settlement_runs (id SERIAL PRIMARY KEY, week_start DATE NOT NULL, revenue NUMERIC(10,2) NOT NULL, restock_allocation NUMERIC(10,2) NOT NULL, contingency_buffer NUMERIC(10,2) NOT NULL, growth_fund NUMERIC(10,2) NOT NULL, distributable_amount NUMERIC(10,2) NOT NULL, status VARCHAR(30) NOT NULL DEFAULT 'PENDING_REVIEW', created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), approved_at TIMESTAMPTZ, approved_by INTEGER REFERENCES users(id));
     CREATE TABLE IF NOT EXISTS payouts (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), week_start DATE NOT NULL, amount NUMERIC(10,2) NOT NULL, status VARCHAR(30) NOT NULL DEFAULT 'PENDING_REVIEW', approved_by INTEGER REFERENCES users(id), created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
     CREATE TABLE IF NOT EXISTS audit_logs (id SERIAL PRIMARY KEY, actor_id INTEGER REFERENCES users(id), action VARCHAR(120) NOT NULL, entity_type VARCHAR(80) NOT NULL, entity_id VARCHAR(80), metadata JSONB NOT NULL DEFAULT '{}'::jsonb, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+    CREATE TABLE IF NOT EXISTS inter_dept_messages (id SERIAL PRIMARY KEY, from_dept VARCHAR(40) NOT NULL, to_dept VARCHAR(40) NOT NULL, subject VARCHAR(160) NOT NULL, body TEXT NOT NULL, related_type VARCHAR(80), related_id VARCHAR(80), priority VARCHAR(20) NOT NULL DEFAULT 'NORMAL', status VARCHAR(20) NOT NULL DEFAULT 'UNREAD', created_by INTEGER REFERENCES users(id), assigned_to INTEGER REFERENCES users(id), created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), read_at TIMESTAMPTZ, resolved_at TIMESTAMPTZ);
+    CREATE INDEX IF NOT EXISTS inter_dept_messages_recipient_idx ON inter_dept_messages (to_dept, status);
   `);
 }
 
@@ -118,7 +156,8 @@ async function seedLocalAdmin() {
   saveLocalUsers();
 }
 
-app.use(cors({ origin: process.env.FRONTEND_URL || 'http://localhost:5173' }));
+const allowedOrigins = new Set([process.env.FRONTEND_URL || 'http://localhost:5173', 'http://localhost:5173', 'http://127.0.0.1:5173']);
+app.use(cors({ origin: (origin, callback) => callback(null, !origin || allowedOrigins.has(origin)) }));
 app.use(express.json());
 
 app.get('/api/health', async (_request, response) => {
@@ -128,8 +167,66 @@ app.get('/api/health', async (_request, response) => {
     response.json({ status: 'ok', database: 'connected' });
   } catch (error) {
     console.error('Database health check failed', error.message);
+    emit('health.degraded', { service: 'database', message: 'Database connectivity degraded' });
     response.status(503).json({ status: 'degraded', database: 'disconnected' });
   }
+});
+
+app.get('/api/system/maintenance', authGuard(), (_request, response) => response.json(localSystem.maintenance));
+
+app.post('/api/system/maintenance', authGuard(['TECHNICAL', 'SUPER_ADMIN']), async (request, response) => {
+  const { enabled, message = 'Safi Squad is temporarily unavailable while we perform maintenance.', durationMinutes = 60 } = request.body || {};
+  if (typeof enabled !== 'boolean') return response.status(400).json({ error: 'enabled must be a boolean.' });
+  const duration = Math.max(1, Math.min(1440, Number(durationMinutes) || 60));
+  localSystem.maintenance = { enabled, message: String(message).trim(), until: enabled ? Date.now() + duration * 60_000 : null, updatedAt: new Date().toISOString() };
+  if (usingLocalStorage) saveLocalSystem();
+  await logAudit(request.user.userId, enabled ? 'MAINTENANCE_ENABLED' : 'MAINTENANCE_DISABLED', 'SYSTEM', 'maintenance', { message, durationMinutes: duration });
+  emit(enabled ? 'system.maintenance' : 'system.restored', { ...localSystem.maintenance });
+  response.json({ ok: true, maintenance: localSystem.maintenance });
+});
+
+app.post('/api/system/broadcast', authGuard(['TECHNICAL', 'SUPER_ADMIN', 'MANAGEMENT']), async (request, response) => {
+  const { message, priority = 'NORMAL' } = request.body || {};
+  if (!message || !['LOW', 'NORMAL', 'HIGH', 'URGENT'].includes(priority)) return response.status(400).json({ error: 'Message and valid priority are required.' });
+  await logAudit(request.user.userId, 'SYSTEM_BROADCAST', 'SYSTEM', 'broadcast', { priority, message });
+  emit('system.broadcast', { message: String(message).trim(), priority, fromUserId: request.user.userId });
+  response.status(201).json({ ok: true });
+});
+
+app.post('/api/webhooks/mpesa', async (request, response) => {
+  const callback = request.body?.Body?.stkCallback || request.body?.stkCallback || {};
+  const resultCode = Number(callback.ResultCode);
+  const metadata = paymentMetadata(callback.CallbackMetadata);
+  const reference = metadata.AccountReference || request.body?.accountReference || '';
+  const providerReference = metadata.MpesaReceiptNumber || callback.CheckoutRequestID || `MPESA-${Date.now()}`;
+  if (!reference) return response.status(400).json({ error: 'Payment reference is required.' });
+  if (usingLocalStorage && localPayments.some((payment) => payment.provider_reference === providerReference)) return response.json({ ResultCode: 0, ResultDesc: 'Already processed' });
+  const trackingCode = String(reference).toUpperCase();
+  const amount = Number(metadata.Amount || request.body?.amount || 0);
+  if (resultCode !== 0) {
+    emit('payment.failed', { trackingCode, reference: providerReference, resultCode, message: callback.ResultDesc || 'Payment failed' });
+    return response.json({ ResultCode: 0, ResultDesc: 'Callback received' });
+  }
+  if (usingLocalStorage) {
+    const order = localOrders.find((item) => item.tracking_code === trackingCode);
+    if (!order) return response.status(404).json({ error: 'Order not found.' });
+    const payment = { id: Date.now(), order_id: order.id, amount, type: 'DEPOSIT', status: 'PAID', provider_reference: providerReference, created_at: new Date().toISOString() };
+    localPayments.unshift(payment); applyPaymentEvent(order, payment); saveLocalPayments(); saveLocalOrders();
+    return response.json({ ResultCode: 0, ResultDesc: 'Accepted' });
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const orderResult = await client.query('SELECT * FROM orders WHERE tracking_code = $1 FOR UPDATE', [trackingCode]);
+    if (!orderResult.rowCount) { await client.query('ROLLBACK'); return response.status(404).json({ error: 'Order not found.' }); }
+    const existing = await client.query('SELECT id FROM payments WHERE provider_reference = $1', [providerReference]);
+    if (existing.rowCount) { await client.query('ROLLBACK'); return response.json({ ResultCode: 0, ResultDesc: 'Already processed' }); }
+    await client.query('INSERT INTO payments (order_id, amount, type, status, provider_reference) VALUES ($1,$2,$3,$4,$5)', [orderResult.rows[0].id, amount, 'DEPOSIT', 'PAID', providerReference]);
+    await client.query('UPDATE orders SET deposit_paid = deposit_paid + $1, updated_at = NOW() WHERE id = $2', [amount, orderResult.rows[0].id]);
+    await client.query('COMMIT');
+    emit('payment.received', { orderId: orderResult.rows[0].id, trackingCode, amount, reference: providerReference });
+    response.json({ ResultCode: 0, ResultDesc: 'Accepted' });
+  } catch (error) { await client.query('ROLLBACK'); response.status(500).json({ error: 'Could not record payment.' }); } finally { client.release(); }
 });
 
 app.get('/api/summary', (_request, response) => {
@@ -161,8 +258,71 @@ app.post('/api/auth/login', async (request, response) => {
       ? localUsers.find((item) => item.email === email.toLowerCase())
       : (await pool.query('SELECT id, email, password_hash, role FROM users WHERE email = $1', [email.toLowerCase()])).rows[0];
     if (!user || !(await verifyPassword(password, user.password_hash))) return response.status(401).json({ error: 'Invalid email or password.' });
-    response.json({ token: issueToken(user), user: { id: user.id, email: user.email, role: user.role } });
+    response.json({ token: issueToken(user), user: { id: user.id, email: user.email, role: normalizeRole(user.role), department: departmentForRole(user.role) } });
   } catch (error) { response.status(500).json({ error: 'Login is unavailable.' }); }
+});
+
+app.get('/api/dashboard/stream', authGuard(), (request, response) => {
+  const department = departmentForRole(request.user.role);
+  const patterns = roleEvents[department] || roleEvents.SECRETARIAT;
+  response.status(200).set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive' });
+  response.flushHeaders();
+  response.write(': connected\n\n');
+  const send = (envelope) => response.write(`data: ${JSON.stringify(envelope)}\n\n`);
+  patterns.forEach((pattern) => recentEvents(pattern).slice(-20).forEach(send));
+  const cleanups = patterns.map((pattern) => subscribe(pattern, send));
+  const heartbeat = setInterval(() => response.write(': ping\n\n'), 25000);
+  request.on('close', () => { clearInterval(heartbeat); cleanups.forEach((cleanup) => cleanup()); });
+});
+
+app.get('/api/messages', authGuard(), async (request, response) => {
+  const department = departmentForRole(request.user.role);
+  if (usingLocalStorage) {
+    const messages = localMessages.filter((message) => department === 'MANAGEMENT' || message.to_dept === department || message.from_dept === department);
+    return response.json({ messages });
+  }
+  const result = department === 'MANAGEMENT'
+    ? await pool.query('SELECT * FROM inter_dept_messages ORDER BY created_at DESC LIMIT 100')
+    : await pool.query('SELECT * FROM inter_dept_messages WHERE to_dept = $1 OR from_dept = $1 ORDER BY created_at DESC LIMIT 100', [department]);
+  response.json({ messages: result.rows });
+});
+
+app.post('/api/messages', authGuard(), async (request, response) => {
+  const { toDept, subject, body, relatedType, relatedId, priority = 'NORMAL' } = request.body || {};
+  const validDepartments = ['SECRETARIAT', 'FINANCE', 'MANAGEMENT', 'PROMOTIONS', 'TECHNICAL'];
+  const fromDept = departmentForRole(request.user.role);
+  if (!validDepartments.includes(toDept) || !subject || !body || !['LOW', 'NORMAL', 'HIGH', 'URGENT'].includes(priority)) return response.status(400).json({ error: 'Recipient, subject, body, and valid priority are required.' });
+  if (toDept === fromDept && fromDept !== 'MANAGEMENT') return response.status(400).json({ error: 'Choose another department.' });
+  if (usingLocalStorage) {
+    const message = { id: Date.now(), from_dept: fromDept, to_dept: toDept, subject: String(subject).trim(), body: String(body).trim(), related_type: relatedType || null, related_id: relatedId || null, priority, status: 'UNREAD', created_by: request.user.userId, created_at: new Date().toISOString() };
+    localMessages.unshift(message); saveLocalMessages(); emit('query.raised', { messageId: message.id, toDept, fromDept, subject: message.subject, priority });
+    return response.status(201).json({ message });
+  }
+  const result = await pool.query('INSERT INTO inter_dept_messages (from_dept, to_dept, subject, body, related_type, related_id, priority, created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *', [fromDept, toDept, String(subject).trim(), String(body).trim(), relatedType || null, relatedId || null, priority, request.user.userId]);
+  emit('query.raised', { messageId: result.rows[0].id, toDept, fromDept, subject: result.rows[0].subject, priority });
+  response.status(201).json({ message: result.rows[0] });
+});
+
+app.patch('/api/messages/:id', authGuard(), async (request, response) => {
+  const { status } = request.body || {};
+  if (!['READ', 'RESOLVED', 'ARCHIVED'].includes(status)) return response.status(400).json({ error: 'Invalid message status.' });
+  const department = departmentForRole(request.user.role);
+  if (usingLocalStorage) {
+    const message = localMessages.find((item) => item.id === Number(request.params.id));
+    if (!message) return response.status(404).json({ error: 'Message not found.' });
+    if (department !== 'MANAGEMENT' && message.to_dept !== department && message.from_dept !== department) return response.status(403).json({ error: 'You cannot update this message.' });
+    message.status = status;
+    if (status === 'READ') message.read_at = new Date().toISOString();
+    if (status === 'RESOLVED') message.resolved_at = new Date().toISOString();
+    saveLocalMessages();
+    return response.json({ message });
+  }
+  const timestamp = status === 'READ' ? 'read_at' : status === 'RESOLVED' ? 'resolved_at' : null;
+  const visibility = department === 'MANAGEMENT' ? '' : ' AND (to_dept = $3 OR from_dept = $3)';
+  const values = department === 'MANAGEMENT' ? [status, request.params.id] : [status, request.params.id, department];
+  const result = await pool.query(`UPDATE inter_dept_messages SET status = $1${timestamp ? `, ${timestamp} = NOW()` : ''} WHERE id = $2${visibility} RETURNING *`, values);
+  if (!result.rowCount) return response.status(404).json({ error: 'Message not found.' });
+  response.json({ message: result.rows[0] });
 });
 
 app.get('/api/users', authGuard(['ADMIN']), async (_request, response) => {
@@ -173,15 +333,17 @@ app.get('/api/users', authGuard(['ADMIN']), async (_request, response) => {
 
 app.post('/api/users', authGuard(['ADMIN']), async (request, response) => {
   const { email, password, role = 'MEMBER', phone } = request.body;
-  if (!email || !password || !['ADMIN', 'MEMBER', 'FINANCE_OFFICER'].includes(role)) return response.status(400).json({ error: 'Email, password, and a valid staff role are required.' });
+  const validStaffRoles = ['ADMIN', 'SUPER_ADMIN', 'MANAGEMENT', 'SECRETARIAT', 'FINANCE', 'FINANCE_OFFICER', 'PROMOTIONS', 'TECHNICAL', 'MEMBER'];
+  if (!email || !password || !validStaffRoles.includes(String(role).toUpperCase())) return response.status(400).json({ error: 'Email, password, and a valid staff role are required.' });
+  const normalizedRole = String(role).toUpperCase();
   const passwordHash = await hashPassword(password);
   if (usingLocalStorage) {
     if (localUsers.some((user) => user.email === email.toLowerCase())) return response.status(409).json({ error: 'Email already exists.' });
-    const user = { id: localUsers.length + 1, email: email.toLowerCase(), password_hash: passwordHash, role, phone: phone || null, created_at: new Date().toISOString() };
+    const user = { id: localUsers.length + 1, email: email.toLowerCase(), password_hash: passwordHash, role: normalizedRole, phone: phone || null, created_at: new Date().toISOString() };
     localUsers.push(user); saveLocalUsers(); return response.status(201).json({ user: { id: user.id, email: user.email, role: user.role, phone: user.phone } });
   }
   try {
-    const result = await pool.query('INSERT INTO users (email, password_hash, role, phone) VALUES ($1,$2,$3,$4) RETURNING id, email, role, phone', [email.toLowerCase(), passwordHash, role, phone || null]);
+    const result = await pool.query('INSERT INTO users (email, password_hash, role, phone) VALUES ($1,$2,$3,$4) RETURNING id, email, role, phone', [email.toLowerCase(), passwordHash, normalizedRole, phone || null]);
     response.status(201).json({ user: result.rows[0] });
   } catch (_error) { response.status(409).json({ error: 'Could not create staff user.' }); }
 });
@@ -234,6 +396,7 @@ app.post('/api/orders', async (request, response) => {
     };
     localOrders.unshift(order); saveLocalOrders();
     logAudit(null, 'ORDER_CREATED', 'ORDER', order.tracking_code, { customerName: name, total, trackingCode: order.tracking_code });
+    emit('order.created', { orderId: order.id, trackingCode: order.tracking_code, amount: total, services: order.services });
     if (depositPaid > 0) triggerMpesaStk(phone, depositPaid, order.tracking_code).catch((error) => console.error('M-Pesa STK request failed', error.message));
     const notification = await notifyOperations(order);
     return response.status(201).json({ order, notification });
@@ -254,6 +417,7 @@ app.post('/api/orders', async (request, response) => {
     await client.query('INSERT INTO payments (order_id, amount, type, status) VALUES ($1, $2, $3, $4)', [order.id, depositPaid, 'DEPOSIT', 'PENDING']);
     await client.query('INSERT INTO audit_logs (actor_id, action, entity_type, entity_id, metadata) VALUES ($1, $2, $3, $4, $5)', [null, 'ORDER_CREATED', 'ORDER', String(order.id), JSON.stringify({ trackingCode, total, customerName: name })]);
     await client.query('COMMIT');
+    emit('order.created', { orderId: order.id, trackingCode: order.tracking_code, amount: total, services: requestedServices });
     if (depositPaid > 0) triggerMpesaStk(phone, depositPaid, order.tracking_code).catch((error) => console.error('M-Pesa STK request failed', error.message));
     const notification = await notifyOperations({ ...order, services: requestedServices, service_details: serviceDetails });
     response.status(201).json({ order: { ...order, services: requestedServices, service_details: serviceDetails, events: [{ status: 'Pending', note: 'Booking received', created_at: order.created_at }] }, notification });
@@ -301,12 +465,19 @@ app.get('/api/orders/:id/qr', authGuard(['ADMIN', 'MEMBER']), async (request, re
 app.patch('/api/orders/:id/status', authGuard(['ADMIN', 'MEMBER', 'FINANCE_OFFICER']), async (request, response) => {
   const { status, note } = request.body;
   if (!orderStatuses.includes(status)) return response.status(400).json({ error: 'Invalid order status.' });
+  const canOverride = ['ADMIN', 'SUPER_ADMIN', 'MANAGEMENT'].includes(normalizeRole(request.user.role));
+  const canAdvance = ['ADMIN', 'SUPER_ADMIN', 'MANAGEMENT', 'SECRETARIAT', 'MEMBER'].includes(normalizeRole(request.user.role));
+  if (!canAdvance) return response.status(403).json({ error: 'Only Secretariat or Management can change order status.' });
   if (usingLocalStorage) {
     const order = localOrders.find((item) => item.id === Number(request.params.id));
     if (!order) return response.status(404).json({ error: 'Order not found.' });
     const previousStatus = order.status;
+    try { assertTransition(previousStatus, status, { override: canOverride }); } catch (error) { return response.status(409).json({ error: error.message }); }
+    if (canOverride && previousStatus !== status && !note) return response.status(400).json({ error: 'Management overrides require a reason.' });
     order.status = status; order.updated_at = new Date().toISOString(); order.events.push({ status, note: note || `Status updated to ${status}`, created_at: order.updated_at });
     saveLocalOrders();
+    emit('order.status_changed', { orderId: order.id, trackingCode: order.tracking_code, previousStatus, status, actorId: request.user.userId });
+    if (status === 'Delivered') emit('order.delivered', { orderId: order.id, trackingCode: order.tracking_code, amount: order.estimated_cost });
     logAudit(request.user.userId, 'ORDER_STATUS_UPDATED', 'ORDER', order.id, { previousStatus, currentStatus: status, note: note || `Status updated to ${status}` });
     return response.json({ order });
   }
@@ -314,11 +485,16 @@ app.patch('/api/orders/:id/status', authGuard(['ADMIN', 'MEMBER', 'FINANCE_OFFIC
   try {
     await client.query('BEGIN');
     const previous = await client.query('SELECT status FROM orders WHERE id = $1', [request.params.id]);
+    if (!previous.rowCount) { await client.query('ROLLBACK'); return response.status(404).json({ error: 'Order not found.' }); }
+    try { assertTransition(previous.rows[0].status, status, { override: canOverride }); } catch (error) { await client.query('ROLLBACK'); return response.status(409).json({ error: error.message }); }
+    if (canOverride && previous.rows[0].status !== status && !note) { await client.query('ROLLBACK'); return response.status(400).json({ error: 'Management overrides require a reason.' }); }
     const result = await client.query('UPDATE orders SET status = $1, updated_at = NOW() WHERE id = $2 RETURNING *', [status, request.params.id]);
     if (!result.rowCount) { await client.query('ROLLBACK'); return response.status(404).json({ error: 'Order not found.' }); }
     await client.query('INSERT INTO order_events (order_id, status, note) VALUES ($1, $2, $3)', [request.params.id, status, note || `Status updated to ${status}`]);
     await client.query('INSERT INTO audit_logs (actor_id, action, entity_type, entity_id, metadata) VALUES ($1, $2, $3, $4, $5)', [request.user.userId, 'ORDER_STATUS_UPDATED', 'ORDER', request.params.id, JSON.stringify({ previousStatus: previous.rows[0]?.status, currentStatus: status, note: note || `Status updated to ${status}` })]);
     await client.query('COMMIT');
+    emit('order.status_changed', { orderId: result.rows[0].id, trackingCode: result.rows[0].tracking_code, previousStatus: previous.rows[0]?.status, status, actorId: request.user.userId });
+    if (status === 'Delivered') emit('order.delivered', { orderId: result.rows[0].id, trackingCode: result.rows[0].tracking_code, amount: result.rows[0].estimated_cost });
     response.json({ order: result.rows[0] });
   } catch (error) { await client.query('ROLLBACK'); response.status(500).json({ error: 'Could not update the order.' }); }
   finally { client.release(); }
@@ -327,28 +503,38 @@ app.patch('/api/orders/:id/status', authGuard(['ADMIN', 'MEMBER', 'FINANCE_OFFIC
 app.patch('/api/orders/:id/workflow', authGuard(['ADMIN', 'MEMBER']), async (request, response) => {
   const { status, note, photoUrl, photoType } = request.body;
   if (!orderStatuses.includes(status)) return response.status(400).json({ error: 'Invalid workflow status.' });
+  const role = normalizeRole(request.user.role);
+  if (!['ADMIN', 'SUPER_ADMIN', 'MANAGEMENT', 'SECRETARIAT', 'MEMBER'].includes(role)) return response.status(403).json({ error: 'Only Secretariat or Management can update workflow.' });
   if (photoUrl && !['BEFORE', 'AFTER'].includes(photoType)) return response.status(400).json({ error: 'photoType must be BEFORE or AFTER.' });
   const now = new Date().toISOString();
   if (usingLocalStorage) {
     const order = localOrders.find((item) => item.id === Number(request.params.id));
     if (!order) return response.status(404).json({ error: 'Order not found.' });
+    try { assertTransition(order.status, status, { override: ['ADMIN', 'SUPER_ADMIN', 'MANAGEMENT'].includes(role) }); } catch (error) { return response.status(409).json({ error: error.message }); }
     order.status = status; order.updated_at = now;
     order.events.push({ status, note: note || `Workflow updated to ${status}`, created_at: now });
     order.workflow_steps = order.workflow_steps || []; order.workflow_steps.push({ status, started_at: now, actor_id: request.user.userId, note: note || null });
     if (photoUrl) { order.photos = order.photos || []; order.photos.push({ photo_type: photoType, url: photoUrl, uploaded_by: request.user.userId, created_at: now }); }
     saveLocalOrders(); saveLocalWorkflow();
+    emit('order.status_changed', { orderId: order.id, trackingCode: order.tracking_code, status, actorId: request.user.userId });
     return response.json({ order });
   }
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    const previous = await client.query('SELECT status FROM orders WHERE id = $1', [request.params.id]);
+    if (!previous.rowCount) { await client.query('ROLLBACK'); return response.status(404).json({ error: 'Order not found.' }); }
+    try { assertTransition(previous.rows[0].status, status, { override: ['ADMIN', 'SUPER_ADMIN', 'MANAGEMENT'].includes(role) }); } catch (error) { await client.query('ROLLBACK'); return response.status(409).json({ error: error.message }); }
+    if (['ADMIN', 'SUPER_ADMIN', 'MANAGEMENT'].includes(role) && previous.rows[0].status !== status && !note) { await client.query('ROLLBACK'); return response.status(400).json({ error: 'Management overrides require a reason.' }); }
     const result = await client.query('UPDATE orders SET status = $1, updated_at = NOW() WHERE id = $2 RETURNING *', [status, request.params.id]);
     if (!result.rowCount) { await client.query('ROLLBACK'); return response.status(404).json({ error: 'Order not found.' }); }
     await client.query('INSERT INTO order_events (order_id, status, note) VALUES ($1, $2, $3)', [request.params.id, status, note || `Workflow updated to ${status}`]);
     await client.query('INSERT INTO workflow_steps (order_id, status, actor_id, note) VALUES ($1, $2, $3, $4)', [request.params.id, status, request.user.userId, note || null]);
     if (photoUrl) await client.query('INSERT INTO order_photos (order_id, photo_type, url, uploaded_by) VALUES ($1, $2, $3, $4)', [request.params.id, photoType, photoUrl, request.user.userId]);
     await client.query('INSERT INTO audit_logs (actor_id, action, entity_type, entity_id, metadata) VALUES ($1, $2, $3, $4, $5)', [request.user.userId, 'WORKFLOW_UPDATED', 'ORDER', request.params.id, JSON.stringify({ status, photoUrl: Boolean(photoUrl) })]);
-    await client.query('COMMIT'); response.json({ order: result.rows[0] });
+    await client.query('COMMIT');
+    emit('order.status_changed', { orderId: result.rows[0].id, trackingCode: result.rows[0].tracking_code, status, actorId: request.user.userId });
+    response.json({ order: result.rows[0] });
   } catch (error) { await client.query('ROLLBACK'); response.status(500).json({ error: 'Could not update workflow.' }); }
   finally { client.release(); }
 });
@@ -378,6 +564,18 @@ app.get('/api/admin/metrics', authGuard(['ADMIN', 'MEMBER', 'FINANCE_OFFICER']),
     backlog: Math.max(0, overview.activeOrders - overview.qcQueue),
   };
   response.json({ overview, health, lastUpdated: new Date().toISOString() });
+});
+
+app.get('/api/management/overview', authGuard(['ADMIN']), async (_request, response) => {
+  const orders = usingLocalStorage ? localOrders : (await pool.query('SELECT * FROM orders')).rows;
+  const overview = buildAdminOverview(orders);
+  const messages = usingLocalStorage
+    ? localMessages
+    : (await pool.query("SELECT * FROM inter_dept_messages WHERE status IN ('UNREAD', 'READ') ORDER BY created_at DESC LIMIT 100")).rows;
+  const pipeline = orderStatuses.reduce((counts, status) => ({ ...counts, [status]: orders.filter((order) => order.status === status).length }), {});
+  const unreadQueries = messages.filter((message) => message.status === 'UNREAD').length;
+  const urgentQueries = messages.filter((message) => message.status === 'UNREAD' && ['HIGH', 'URGENT'].includes(message.priority)).length;
+  response.json({ ordersToday: orders.filter((order) => String(order.created_at || '').slice(0, 10) === new Date().toISOString().slice(0, 10)).length, revenue: overview.revenue, slaBreaches: orders.filter((order) => order.status !== 'Delivered' && Date.now() - new Date(order.updated_at || order.created_at).getTime() > 24 * 3600_000).length, activeStaff: usingLocalStorage ? localUsers.filter((user) => user.role !== 'CUSTOMER').length : (await pool.query("SELECT COUNT(*)::int AS count FROM users WHERE role <> 'CUSTOMER'")).rows[0].count, pipeline, unreadQueries, urgentQueries, maintenance: localSystem.maintenance, refreshedAt: new Date().toISOString() });
 });
 
 app.get('/api/settlements', authGuard(['ADMIN', 'FINANCE_OFFICER']), async (_request, response) => {
@@ -435,7 +633,7 @@ app.get('/api/admin/track/:trackingCode', async (request, response) => {
 });
 
 app.listen(port, async () => {
-  try { await ensureSchema(); await seedLocalAdmin(); console.log(usingLocalStorage ? 'Using local order storage' : 'Database schema ready'); } catch (error) { console.error('Database schema setup failed', error.message); }
+  try { await ensureSchema(); await seedLocalAdmin(); await initializeRedis(); console.log(usingLocalStorage ? 'Using local order storage' : 'Database schema ready'); } catch (error) { console.error('Database schema setup failed', error.message); }
   console.log(`Safi Squad API running on http://localhost:${port}`);
   cron.schedule('0 23 * * 0', () => createScheduledSettlementDraft().catch((error) => console.error('Settlement draft failed', error.message)));
 });

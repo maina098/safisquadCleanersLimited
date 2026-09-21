@@ -1,7 +1,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { calculateServiceAmount, normalizeOrderInput, isRoleAllowed } = require('../validators');
+const { calculateServiceAmount, normalizeOrderInput } = require('../validators');
+const { isRoleAllowed } = require('../security');
+const { assertTransition } = require('../orderStateMachine');
 
 test('calculateServiceAmount totals known services correctly', () => {
   const result = calculateServiceAmount('house-deep-cleaning', 2);
@@ -18,4 +20,9 @@ test('normalizeOrderInput rejects missing essential booking fields', () => {
 test('role guard accepts allowed roles and rejects unauthorized access', () => {
   assert.equal(isRoleAllowed('MANAGEMENT', ['SECRETARIAT', 'MANAGEMENT']), true);
   assert.equal(isRoleAllowed('CUSTOMER', ['MANAGEMENT', 'FINANCE']), false);
+});
+
+test('order state machine rejects skipped lifecycle steps and allows management overrides', () => {
+  assert.throws(() => assertTransition('Pending', 'Delivered'), /Illegal transition/);
+  assert.doesNotThrow(() => assertTransition('Pending', 'Delivered', { override: true }));
 });

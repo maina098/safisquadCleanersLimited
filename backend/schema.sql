@@ -47,8 +47,9 @@ CREATE TABLE IF NOT EXISTS users (
   id SERIAL PRIMARY KEY,
   email VARCHAR(255) UNIQUE NOT NULL,
   password_hash VARCHAR(255) NOT NULL,
-  role VARCHAR(40) NOT NULL CHECK (role IN ('ADMIN', 'MEMBER', 'FINANCE_OFFICER', 'CUSTOMER')),
+  role VARCHAR(40) NOT NULL CHECK (role IN ('ADMIN', 'SUPER_ADMIN', 'MANAGEMENT', 'SECRETARIAT', 'FINANCE', 'FINANCE_OFFICER', 'PROMOTIONS', 'TECHNICAL', 'MEMBER', 'CUSTOMER')),
   phone VARCHAR(40),
+  name VARCHAR(120),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -144,3 +145,22 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS inter_dept_messages (
+  id SERIAL PRIMARY KEY,
+  from_dept VARCHAR(40) NOT NULL,
+  to_dept VARCHAR(40) NOT NULL,
+  subject VARCHAR(160) NOT NULL,
+  body TEXT NOT NULL,
+  related_type VARCHAR(80),
+  related_id VARCHAR(80),
+  priority VARCHAR(20) NOT NULL DEFAULT 'NORMAL',
+  status VARCHAR(20) NOT NULL DEFAULT 'UNREAD',
+  created_by INTEGER REFERENCES users(id),
+  assigned_to INTEGER REFERENCES users(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  read_at TIMESTAMPTZ,
+  resolved_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS inter_dept_messages_recipient_idx ON inter_dept_messages (to_dept, status);

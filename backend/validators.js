@@ -70,26 +70,9 @@ function normalizeOrderInput(payload = {}) {
   return { ok: errors.length === 0, errors, data: normalized };
 }
 
-function isRoleAllowed(role, allowedRoles = []) {
-  const normalizedRole = String(role || '').toUpperCase();
-  const roleList = allowedRoles.map((entry) => String(entry || '').toUpperCase());
-  const aliasMap = {
-    SUPER_ADMIN: 'ADMIN',
-    MANAGEMENT: 'ADMIN',
-    SECRETARIAT: 'MEMBER',
-    PROMOTIONS: 'MEMBER',
-    TECHNICAL: 'MEMBER',
-    FINANCE: 'FINANCE_OFFICER',
-  };
-  const canonicalRole = aliasMap[normalizedRole] || normalizedRole;
-
-  return roleList.includes(canonicalRole) || roleList.includes(normalizedRole);
-}
-
 module.exports = {
   serviceCatalog,
   ORDER_STATUS_SEQUENCE,
   calculateServiceAmount,
   normalizeOrderInput,
-  isRoleAllowed,
 };

@@ -5,12 +5,12 @@ const jwtSecret = process.env.JWT_SECRET || 'replace-this-development-secret';
 
 const ROLE_ALIASES = {
   ADMIN: 'ADMIN',
-  SUPER_ADMIN: 'ADMIN',
-  MANAGEMENT: 'ADMIN',
-  SECRETARIAT: 'MEMBER',
-  PROMOTIONS: 'MEMBER',
-  TECHNICAL: 'MEMBER',
-  FINANCE: 'FINANCE_OFFICER',
+  SUPER_ADMIN: 'SUPER_ADMIN',
+  MANAGEMENT: 'MANAGEMENT',
+  SECRETARIAT: 'SECRETARIAT',
+  PROMOTIONS: 'PROMOTIONS',
+  TECHNICAL: 'TECHNICAL',
+  FINANCE: 'FINANCE',
   FINANCE_OFFICER: 'FINANCE_OFFICER',
   MEMBER: 'MEMBER',
   CUSTOMER: 'CUSTOMER',
@@ -32,7 +32,11 @@ function normalizeRole(role) {
 function isRoleAllowed(role, allowedRoles = []) {
   const normalizedRole = normalizeRole(role);
   const normalizedAllowed = allowedRoles.map((entry) => normalizeRole(entry));
-  return normalizedAllowed.includes(normalizedRole);
+  if (normalizedAllowed.includes(normalizedRole)) return true;
+  if (normalizedAllowed.includes('ADMIN') && ['SUPER_ADMIN', 'MANAGEMENT'].includes(normalizedRole)) return true;
+  if (normalizedAllowed.includes('MEMBER') && ['SECRETARIAT', 'PROMOTIONS', 'TECHNICAL'].includes(normalizedRole)) return true;
+  if (normalizedAllowed.includes('FINANCE_OFFICER') && normalizedRole === 'FINANCE') return true;
+  return false;
 }
 
 function issueToken(user) {
@@ -42,7 +46,8 @@ function issueToken(user) {
 function authGuard(allowedRoles = []) {
   return (request, response, next) => {
     const header = request.headers.authorization || '';
-    const token = header.startsWith('Bearer ') ? header.slice(7) : '';
+    const isDashboardStream = request.path.endsWith('/dashboard/stream') || request.path === '/stream';
+    const token = header.startsWith('Bearer ') ? header.slice(7) : (isDashboardStream ? String(request.query.token || '') : '');
     if (!token) return response.status(401).json({ error: 'Authentication required.' });
     try {
       request.user = jwt.verify(token, jwtSecret);
