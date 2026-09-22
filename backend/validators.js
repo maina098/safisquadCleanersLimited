@@ -8,6 +8,7 @@ const serviceCatalog = [
   { id: 'airbnb-restock', name: 'Airbnb / turnover clean', rule: 'FIXED', price: 4200, category: 'airbnb' },
   { id: 'sofa-care', name: 'Sofa and upholstery care', rule: 'FIXED', price: 2500, category: 'home' },
 ];
+const { money } = require('./money');
 
 const ORDER_STATUS_SEQUENCE = ['Pending', 'Picked Up', 'In-Progress', 'QC Passed', 'Out for Delivery', 'Delivered'];
 
@@ -17,7 +18,7 @@ function calculateServiceAmount(serviceId, quantity = 1) {
   return {
     service,
     quantity: itemQuantity,
-    total: Number(service.price) * itemQuantity,
+    total: money(money(service.price) * itemQuantity),
   };
 }
 

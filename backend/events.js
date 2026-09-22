@@ -70,4 +70,15 @@ function recentEvents(pattern = '*') {
   return history.filter((envelope) => matches(pattern, envelope.event));
 }
 
-module.exports = { emit, subscribe, recentEvents, initializeRedis };
+function eventsAfter(id, pattern = '*') {
+  const index = history.findIndex((envelope) => envelope.id === id);
+  return index < 0 ? [] : history.slice(index + 1).filter((envelope) => matches(pattern, envelope.event));
+}
+
+async function replayEvents(sinceTimestamp, pattern = '*') {
+  if (!redisReady) return recentEvents(pattern).filter((envelope) => new Date(envelope.at).getTime() >= sinceTimestamp);
+  const entries = await publisher.xRange('events:stream', '-', '+');
+  return entries.map((entry) => JSON.parse(entry.message.data)).filter((envelope) => new Date(envelope.at).getTime() >= sinceTimestamp && matches(pattern, envelope.event));
+}
+
+module.exports = { emit, subscribe, recentEvents, eventsAfter, replayEvents, initializeRedis };

@@ -40,17 +40,25 @@ function isRoleAllowed(role, allowedRoles = []) {
 }
 
 function issueToken(user) {
-  return jwt.sign({ userId: user.id, role: normalizeRole(user.role), email: user.email }, jwtSecret, { expiresIn: '8h' });
+  return jwt.sign({ userId: user.id, role: normalizeRole(user.role), email: user.email, tokenVersion: Number(user.token_version) || 0 }, jwtSecret, { expiresIn: '15m' });
+}
+
+function issueRefreshToken(user) {
+  return jwt.sign({ userId: user.id, tokenVersion: Number(user.token_version) || 0, type: 'refresh' }, jwtSecret, { expiresIn: '7d' });
 }
 
 function authGuard(allowedRoles = []) {
-  return (request, response, next) => {
+  return async (request, response, next) => {
     const header = request.headers.authorization || '';
     const isDashboardStream = request.path.endsWith('/dashboard/stream') || request.path === '/stream';
     const token = header.startsWith('Bearer ') ? header.slice(7) : (isDashboardStream ? String(request.query.token || '') : '');
     if (!token) return response.status(401).json({ error: 'Authentication required.' });
     try {
       request.user = jwt.verify(token, jwtSecret);
+      const currentUser = request.app.locals.resolveAuthUser ? await request.app.locals.resolveAuthUser(request.user.userId) : null;
+      if (!currentUser || currentUser.is_active === false || currentUser.status !== 'ACTIVE' || Number(currentUser.token_version || 0) !== Number(request.user.tokenVersion || 0)) {
+        return response.status(401).json({ error: 'Session revoked. Please sign in again.' });
+      }
       request.user.role = normalizeRole(request.user.role);
       if (allowedRoles.length && !isRoleAllowed(request.user.role, allowedRoles)) {
         return response.status(403).json({ error: 'Insufficient permissions.' });
@@ -60,4 +68,4 @@ function authGuard(allowedRoles = []) {
   };
 }
 
-module.exports = { hashPassword, verifyPassword, issueToken, authGuard, normalizeRole, isRoleAllowed };
+module.exports = { hashPassword, verifyPassword, issueToken, issueRefreshToken, authGuard, normalizeRole, isRoleAllowed, verifyToken: (token) => jwt.verify(token, jwtSecret) };

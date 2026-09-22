@@ -1,9 +1,11 @@
+const { decimal, money } = require('./money');
+
 function buildAdminOverview(orders = []) {
   const normalized = Array.isArray(orders) ? orders : [];
   const activeOrders = normalized.filter((order) => !['Delivered', 'CANCELLED'].includes(order.status)).length;
   const pendingPickup = normalized.filter((order) => order.status === 'Pending').length;
   const qcQueue = normalized.filter((order) => order.status === 'QC Passed').length;
-  const revenue = normalized.reduce((total, order) => total + Number(order.estimated_cost || order.deposit_paid || 0), 0);
+  const revenue = money(normalized.reduce((total, order) => total.plus(order.estimated_cost || order.deposit_paid || 0), decimal(0)));
 
   const statusBreakdown = normalized.reduce((accumulator, order) => {
     const status = order.status || 'Pending';
@@ -14,7 +16,7 @@ function buildAdminOverview(orders = []) {
   const trend = normalized
     .map((order) => ({
       date: order.preferred_date || order.created_at || new Date().toISOString().slice(0, 10),
-      amount: Number(order.estimated_cost || order.deposit_paid || 0),
+      amount: money(order.estimated_cost || order.deposit_paid || 0),
       status: order.status || 'Pending',
     }))
     .sort((left, right) => left.date.localeCompare(right.date))
@@ -35,40 +37,44 @@ function buildAdminOverview(orders = []) {
       service: order.service || 'General care',
       status: order.status || 'Pending',
       preferred_date: order.preferred_date || order.preferredDate || null,
-      estimated_cost: Number(order.estimated_cost || 0),
+      estimated_cost: money(order.estimated_cost || 0),
     })),
   };
 }
 
 function buildSettlementPlan({ revenue = 0, restockAllocation = 0, contingencyBuffer = 0, memberHours = [] } = {}) {
-  const normalizedRevenue = Number(revenue) || 0;
-  const normalizedRestock = Number(restockAllocation) || 0;
-  const normalizedBuffer = Number(contingencyBuffer) || 0;
+  const normalizedRevenue = decimal(revenue);
+  const normalizedRestock = decimal(restockAllocation);
+  const normalizedBuffer = decimal(contingencyBuffer);
   const normalizedHours = Array.isArray(memberHours) ? memberHours.map((item) => ({
     user_id: Number(item.user_id),
     hours: Number(item.hours || 0),
   })) : [];
 
-  const growthFund = Math.max(0, normalizedRevenue - normalizedRestock - normalizedBuffer) * 0.15;
-  const distributableAmount = Math.max(0, normalizedRevenue - normalizedRestock - normalizedBuffer - growthFund);
+  const growthFund = DecimalMax(normalizedRevenue.minus(normalizedRestock).minus(normalizedBuffer)).times('0.15');
+  const distributableAmount = DecimalMax(normalizedRevenue.minus(normalizedRestock).minus(normalizedBuffer).minus(growthFund));
   const totalHours = normalizedHours.reduce((sum, item) => sum + (Number.isFinite(item.hours) ? item.hours : 0), 0);
 
   const payouts = normalizedHours.map((item) => ({
     user_id: item.user_id,
     hours: item.hours,
-    amount: totalHours > 0 ? distributableAmount * (item.hours / totalHours) : 0,
+    amount: totalHours > 0 ? money(distributableAmount.times(item.hours).div(totalHours)) : 0,
     status: 'PENDING_REVIEW',
   }));
 
   return {
-    revenue: normalizedRevenue,
-    restockAllocation: normalizedRestock,
-    contingencyBuffer: normalizedBuffer,
-    growthFund,
-    distributableAmount,
+    revenue: money(normalizedRevenue),
+    restockAllocation: money(normalizedRestock),
+    contingencyBuffer: money(normalizedBuffer),
+    growthFund: money(growthFund),
+    distributableAmount: money(distributableAmount),
     totalHours,
     payouts,
   };
+}
+
+function DecimalMax(value) {
+  return value.isNegative() ? decimal(0) : value;
 }
 
 function summarizeAuditLogs(entries = []) {
