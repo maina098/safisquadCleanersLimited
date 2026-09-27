@@ -97,7 +97,6 @@ All images are referenced from GitHub repository:
 ### Runtime dependency cleanup
 - Copied the workflow and care media used by React into `frontend/public/assets/`.
 - Updated React references to use first-party `/assets/*` paths.
-- The historical `frontend/public/fabricspa.com/` scrape remains available for reference but is no longer required by the React runtime.
 
 ### Mobile and accessibility hardening
 - Preserved grid-to-stack breakpoints for navigation, service cards, pricing, tracking, portal, and footer layouts.
@@ -127,5 +126,4 @@ All images are referenced from GitHub repository:
 3. Add database migrations, backups, structured logging, and monitoring before production use.
 4. Add server-side rendering or prerendering if organic search traffic becomes a priority for policy and FAQ content.
 5. Replace remote GitHub service images with optimized local WebP/AVIF assets and add image failure fallbacks.
-6. Review the archived `fabricspa.com` directory and remove it after confirming no deployment or historical-link requirement depends on it.
 7. Configure deployment SPA fallback, HTTPS, strict CORS origins, secure JWT secrets, and real payment/SMS credentials.

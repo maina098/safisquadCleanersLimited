@@ -9,7 +9,7 @@ React 19 + Vite customer experience for Safi Squad Cleaning Services.
 - `/#admin` authenticated operations portal entry point
 - `/404.html` static fallback page for hosts that support a public 404 asset
 
-All authored runtime media is under `public/assets/`. The large `public/fabricspa.com/` archive is not an application dependency and should not be included in new routes.
+All authored runtime media is under `public/assets/`.
 
 ## Commands
 
